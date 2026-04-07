@@ -1,0 +1,11 @@
+name = "TestProject"
+uuid = "aa6708bc-5269-40af-9561-b280866f3f39"
+version = "0.1.0"
+authors = ["Tamas Hakkel <hakkelt@gmail.com>"]
+
+[deps]
+GPUEnv = "78a0b619-6146-4252-b244-0f81c54be577"
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+
+[compat]
+JSON = "1.5.0"

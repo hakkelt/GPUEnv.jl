@@ -1,0 +1,13 @@
+name = "Benchmarking"
+uuid = "6f32d2de-c26a-4f83-a081-c597f99f7c31"
+version = "0.1.0"
+authors = ["Tamas Hakkel <hakkelt@gmail.com>"]
+
+[workspace]
+projects = ["benchmark"]
+
+[deps]
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+
+[compat]
+JSON = "1.5.0"

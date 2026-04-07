@@ -1,0 +1,14 @@
+name = "ThirdLevel"
+uuid = "7e785547-f759-41ec-8b7f-19d150a91788"
+version = "0.1.0"
+authors = ["Tamas Hakkel <hakkelt@gmail.com>"]
+
+[deps]
+GPUEnv = "78a0b619-6146-4252-b244-0f81c54be577"
+IniFile = "83e8ac13-25f8-5344-8a64-a9f2b223428f"
+
+[compat]
+IniFile = "0.5.1"
+
+[workspace]
+projects = ["test"]

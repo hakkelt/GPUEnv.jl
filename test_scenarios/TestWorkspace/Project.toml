@@ -1,0 +1,14 @@
+name = "TestWorkspace"
+uuid = "7f839983-46aa-48ba-b18a-19465fdac355"
+version = "0.1.0"
+authors = ["Tamas Hakkel <hakkelt@gmail.com>"]
+
+[workspace]
+projects = ["test"]
+
+[deps]
+GPUEnv = "78a0b619-6146-4252-b244-0f81c54be577"
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+
+[compat]
+JSON = "1.5.0"

@@ -1,0 +1,21 @@
+[deps]
+Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+GPUEnv = "78a0b619-6146-4252-b244-0f81c54be577"
+JLArrays = "27aeb0d3-9eb9-45fb-866b-73c2ecf80fcb"
+Pkg = "44cfe95a-1eb2-52ea-b672-e2afdf69b78f"
+TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+TestItemRunner = "f8b46487-2199-4994-9208-9a1283c18c0a"
+TestItems = "1c621080-faea-4a02-84b6-bbd5e436b8fe"
+
+[compat]
+Aqua = "0.8"
+Documenter = "1"
+JLArrays = "0.2, 0.3"
+Pkg = "1.10"
+TOML = "1"
+TestItemRunner = "1"
+TestItems = "1"
+julia = "1.10"

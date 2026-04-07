@@ -1,0 +1,9 @@
+/docs/build/
+Manifest.toml
+/app/test/Manifest.toml
+/docs/Manifest.toml
+/test/Manifest.toml
+/test/gpu_env/
+/coverage/
+*.jl.cov
+*.jl.mem

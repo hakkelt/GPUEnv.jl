@@ -1,0 +1,15 @@
+name = "TestTarget"
+uuid = "8e14ab89-69b3-4127-af03-a2c7d8f21a85"
+version = "0.1.0"
+authors = ["Tamas Hakkel <hakkelt@gmail.com>"]
+
+[deps]
+GPUEnv = "78a0b619-6146-4252-b244-0f81c54be577"
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+
+[extras]
+GPUEnv = "78a0b619-6146-4252-b244-0f81c54be577"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["GPUEnv", "Test"]

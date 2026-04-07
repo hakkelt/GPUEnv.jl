@@ -1,0 +1,16 @@
+name = "DeeplyNestedWorkspace"
+uuid = "eb10246c-7b3e-4eb2-ae8c-a7f9be6fb717"
+version = "0.1.0"
+authors = ["Tamas Hakkel <hakkelt@gmail.com>"]
+
+[workspace]
+projects = ["SecondLevel", "SecondLevel2"]
+
+[deps]
+GPUEnv = "78a0b619-6146-4252-b244-0f81c54be577"
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+Pkg = "44cfe95a-1eb2-52ea-b672-e2afdf69b78f"
+
+[compat]
+JSON = "1.5.0"
+Pkg = "1.12.1"

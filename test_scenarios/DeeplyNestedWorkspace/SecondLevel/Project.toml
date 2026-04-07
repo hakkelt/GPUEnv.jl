@@ -1,0 +1,15 @@
+name = "SecondLevel"
+uuid = "b4d1ab0e-0e5e-4d70-8852-9d1466dd0ccb"
+version = "0.1.0"
+authors = ["Tamas Hakkel <hakkelt@gmail.com>"]
+
+[workspace]
+projects = ["ThirdLevel"]
+
+[deps]
+GPUEnv = "78a0b619-6146-4252-b244-0f81c54be577"
+YAML = "ddb6d928-2868-570f-bddf-ab3f9cf99eb6"
+
+[compat]
+GPUEnv = "0.1.0"
+YAML = "0.4"
