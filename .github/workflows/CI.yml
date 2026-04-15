@@ -1,28 +1,40 @@
-name: Julia CI
-
+name: CI
 on:
-  push: {branches: [master]}
-  pull_request: {types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]}
-  issue_comment: {types: [created]}
-  schedule: [{cron: '0 0 * * *'}]
+  push:
+    branches:
+      - master
+  pull_request:
   workflow_dispatch:
-    inputs:
-      feature:
-        type: choice
-        description: What to run
-        options: [CompatHelper, DocDeploy, LintAndTest, TagBot]
-
+concurrency:
+  # Skip intermediate builds: always.
+  # Cancel intermediate builds: only if it is a pull request build.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
 jobs:
-  julia-ci:
-    uses: julia-testitems/testitem-workflow/.github/workflows/juliaci.yml@v1
-    with:
-      include-windows-x86: false
-      include-linux-x86: false
-      include-macos-aarch64: false
-      draft-pr-include-lts-versions: false
-      draft-pr-include-smallest-compatible-minor-versions: false
-      draft-pr-include-windows-x64: false
-      draft-pr-include-macos-x64: false
-    permissions: write-all
-    secrets:
-      codecov_token: ${{ secrets.CODECOV_TOKEN }}
+  test:
+    name: Julia ${{ matrix.julia-version }} - ${{ matrix.os }} - ${{ matrix.julia-arch }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions: # needed to allow julia-actions/cache to proactively delete old caches that it has created
+      actions: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        julia-version: ['lts', '1']
+        julia-arch: [x64]
+        os: [ubuntu-latest, windows-latest, macOS-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.julia-version }}
+          arch: ${{ matrix.julia-arch }}
+      - uses: julia-actions/cache@v3
+      - uses: julia-actions/julia-buildpkg@v1
+      - uses: julia-actions/julia-runtest@v1
+      - uses: julia-actions/julia-processcoverage@v1
+      - uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
