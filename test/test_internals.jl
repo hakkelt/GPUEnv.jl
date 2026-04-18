@@ -253,6 +253,22 @@ end
     @test !GPUEnv._can_reuse_persisted_env(sync_state, env_dir; persisted = true)
 end
 
+@testitem "_can_reuse_persisted_env allows manifest-free state when no source manifest was tracked" begin
+    using GPUEnv
+    using Test
+
+    project_data = Dict{String, Any}(
+        "deps" => Dict("Example" => "7876af07-990d-54b4-ab0e-23690620f79a"),
+    )
+    sync_state = GPUEnv._sync_state_data(project_data, nothing, Symbol[])
+    env_dir = mktempdir()
+
+    GPUEnv._write_environment!(project_data, nothing, env_dir)
+    GPUEnv._write_sync_state!(env_dir, sync_state)
+
+    @test GPUEnv._can_reuse_persisted_env(sync_state, env_dir; persisted = true)
+end
+
 @testitem "_install_backend! returns false for unknown backend" begin
     using GPUEnv
     using Test
@@ -299,6 +315,44 @@ end
     end
 end
 
+@testitem "_install_and_filter_backends! only_first removes non-functional backends" begin
+    using GPUEnv
+    using Pkg
+    using Test
+
+    env_dir = mktempdir()
+    write(joinpath(env_dir, "Project.toml"), "name = \"OnlyFirstRemove\"\nuuid = \"00000000-0000-0000-0000-000000000132\"\n")
+
+    previous_project = Base.active_project()
+    try
+        Pkg.activate(env_dir)
+        installed, functional = GPUEnv._install_and_filter_backends!([:JLArrays], _ -> false, true, devnull)
+        @test installed == Symbol[]
+        @test functional == Symbol[]
+    finally
+        previous_project === nothing || Pkg.activate(dirname(previous_project))
+    end
+end
+
+@testitem "_install_and_filter_backends! only_first stops at first functional backend" begin
+    using GPUEnv
+    using Pkg
+    using Test
+
+    env_dir = mktempdir()
+    write(joinpath(env_dir, "Project.toml"), "name = \"OnlyFirstKeep\"\nuuid = \"00000000-0000-0000-0000-000000000133\"\n")
+
+    previous_project = Base.active_project()
+    try
+        Pkg.activate(env_dir)
+        installed, functional = GPUEnv._install_and_filter_backends!([:JLArrays], _ -> true, true, devnull)
+        @test installed == [:JLArrays]
+        @test functional == [:JLArrays]
+    finally
+        previous_project === nothing || Pkg.activate(dirname(previous_project))
+    end
+end
+
 @testitem "_preferred_manifest_path ignores non-matching versioned manifests" begin
     using GPUEnv
     using Test
@@ -335,6 +389,88 @@ end
     @test GPUEnv._workspace_manifest_path(nested) === nothing
 end
 
+@testitem "_find_parent_manifest_path requires parent project" begin
+    using GPUEnv
+    using Test
+
+    root = mktempdir()
+    parent = mkpath(joinpath(root, "parent"))
+    child = mkpath(joinpath(parent, "child"))
+    manifest = joinpath(parent, "Manifest.toml")
+    write(manifest, "# parent manifest\n")
+
+    @test GPUEnv._find_parent_manifest_path(child) === nothing
+
+    write(joinpath(parent, "Project.toml"), "name = \"Parent\"\n")
+    @test GPUEnv._find_parent_manifest_path(child) == manifest
+end
+
+@testitem "_merge_project_tables merges sources without overwriting" begin
+    using GPUEnv
+    using Test
+
+    base_project = Dict{String, Any}(
+        "sources" => Dict{String, Any}(
+            "Existing" => Dict{String, Any}("path" => "/existing"),
+        ),
+    )
+    extra_project = Dict{String, Any}(
+        "sources" => Dict{String, Any}(
+            "Existing" => Dict{String, Any}("path" => "/ignored"),
+            "Added" => Dict{String, Any}("path" => "/added"),
+            "Skipped" => Dict{String, Any}("path" => "/skipped"),
+        ),
+    )
+
+    merged = GPUEnv._merge_project_tables(base_project, extra_project; exclude_packages = Set(["Skipped"]))
+
+    @test merged["sources"]["Existing"]["path"] == "/existing"
+    @test merged["sources"]["Added"]["path"] == "/added"
+    @test !haskey(merged["sources"], "Skipped")
+end
+
+@testitem "_augment_source_project merges path dependency projects" begin
+    using GPUEnv
+    using Test
+
+    root = mktempdir()
+    dep_root = mkpath(joinpath(root, "deps", "LocalDep"))
+    write(
+        joinpath(dep_root, "Project.toml"),
+        """
+        name = "LocalDep"
+        uuid = "00000000-0000-0000-0000-000000000130"
+
+        [deps]
+        ExtraDep = "00000000-0000-0000-0000-000000000131"
+
+        [sources]
+        ExtraDep = { path = "../ExtraDep" }
+        """,
+    )
+    extra_root = mkpath(joinpath(root, "deps", "ExtraDep"))
+    write(joinpath(extra_root, "Project.toml"), "name = \"ExtraDep\"\n")
+
+    manifest_path = joinpath(root, "Manifest.toml")
+    write(
+        manifest_path,
+        """
+        [[deps.LocalDep]]
+        path = "deps/LocalDep"
+        version = "0.1.0"
+        """,
+    )
+
+    project_data = Dict{String, Any}(
+        "deps" => Dict{String, Any}("LocalDep" => "00000000-0000-0000-0000-000000000130"),
+    )
+
+    augmented = GPUEnv._augment_source_project(project_data, root, manifest_path)
+
+    @test augmented["deps"]["ExtraDep"] == "00000000-0000-0000-0000-000000000131"
+    @test augmented["sources"]["ExtraDep"]["path"] == abspath(extra_root)
+end
+
 @testitem "_git_repo_root finds .git directory at parent" begin
     using GPUEnv
     using Test
@@ -357,6 +493,47 @@ end
 
     found = GPUEnv._git_repo_root(subdir)
     @test found == root
+end
+
+@testitem "_maybe_warn_about_persisted_env warns when env is not gitignored" begin
+    using GPUEnv
+    using Pkg
+    using Test
+
+    root = mktempdir()
+    run(`git -C $root init -q`)
+    env_dir = mkpath(joinpath(root, "gpu_env"))
+
+    @test_logs (:warn, r"not ignored") begin
+        @test GPUEnv._maybe_warn_about_persisted_env(root, env_dir; persisted = true, warn_if_unignored = true)
+    end
+
+    project_root = mkpath(joinpath(root, "pkg"))
+    write(
+        joinpath(project_root, "Project.toml"),
+        """
+        name = "WarnPkg"
+        uuid = "00000000-0000-0000-0000-000000000134"
+        version = "0.1.0"
+        """,
+    )
+
+    previous_project = Base.active_project()
+    try
+        Pkg.activate(project_root)
+        @test_logs (:warn, r"not ignored") begin
+            result = GPUEnv.sync_test_env(
+                ;
+                persist = true,
+                dry_run = true,
+                include_jlarrays = false,
+                probe = _ -> false,
+            )
+            @test result.warned_about_gitignore
+        end
+    finally
+        previous_project === nothing || Pkg.activate(dirname(previous_project))
+    end
 end
 
 @testitem "_is_subpath" begin

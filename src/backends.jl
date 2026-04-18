@@ -499,8 +499,6 @@ API without first constructing a CPU array for transfer.
 gpu_wrapper(backend::GpuBackend, ::Type{T}, dims...) where {T} =
     Base.typename(typeof(gpu_zeros(backend, T, dims...))).wrapper
 
-gpu_storage_type(backend::GpuBackend, ::Type{T}, dims...) where {T} = gpu_wrapper(backend, T, dims...)
-
 """
     default_backend_probe(backend; hardware=detect_gpu_hardware(),
                           fallback=_fallback_backend_probe) -> Bool

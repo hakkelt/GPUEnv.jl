@@ -345,6 +345,17 @@ end
     @test resolved2 == false
 end
 
+@testitem "_validate_and_resolve_include_jlarrays: :JLArrays in exclude disables it by default" begin
+    using GPUEnv
+    using Test
+
+    resolved, native = GPUEnv._validate_and_resolve_include_jlarrays(
+        nothing, [:CUDA], [:JLArrays]; default_jlarrays = true,
+    )
+    @test resolved == false
+    @test native == [:CUDA]
+end
+
 @testitem "_validate_and_resolve_include_jlarrays: :JLArrays in backends_to_test → true" begin
     using GPUEnv
     using Test
