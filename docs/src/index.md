@@ -1,6 +1,6 @@
-# GPUEnv
+# GPUEnv.jl
 
-GPUEnv is for downstream packages that support multiple GPU backends but do not
+GPUEnv is a utility for packages that support multiple GPU backends but do not
 want to instantiate all of them up front. It creates a GPU overlay environment
 on top of the active project, lets Pkg resolve the optional backend packages
 that make sense on the current machine, and keeps the parent environment small.

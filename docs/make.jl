@@ -4,7 +4,7 @@ using GPUEnv
 Documenter.DocMeta.setdocmeta!(GPUEnv, :DocTestSetup, :(using GPUEnv); recursive = true)
 
 makedocs(
-    sitename = "GPUEnv",
+    sitename = "GPUEnv.jl",
     modules = [GPUEnv],
     format = Documenter.HTML(repolink = nothing, edit_link = nothing),
     checkdocs = :exports,
