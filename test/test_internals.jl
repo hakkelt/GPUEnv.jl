@@ -253,7 +253,7 @@ end
     @test !GPUEnv._can_reuse_persisted_env(sync_state, env_dir; persisted = true)
 end
 
-@testitem "_can_reuse_persisted_env allows manifest-free state when no source manifest was tracked" begin
+@testitem "_can_reuse_persisted_env allows env-local manifest when no source manifest was tracked" begin
     using GPUEnv
     using Test
 
@@ -267,6 +267,46 @@ end
     GPUEnv._write_sync_state!(env_dir, sync_state)
 
     @test GPUEnv._can_reuse_persisted_env(sync_state, env_dir; persisted = true)
+
+    write(
+        joinpath(env_dir, "Manifest.toml"),
+        """
+        julia_version = "$(VERSION.major).$(VERSION.minor).$(VERSION.patch)"
+        manifest_format = "2.0"
+        project_hash = "overlay"
+        """,
+    )
+
+    @test GPUEnv._can_reuse_persisted_env(sync_state, env_dir; persisted = true)
+end
+
+@testitem "_restore_overlay_sources! rewrites changed sources to disk" begin
+    using GPUEnv
+    using TOML
+    using Test
+
+    env_dir = mktempdir()
+    project_path = joinpath(env_dir, "Project.toml")
+    write(
+        project_path,
+        """
+        [deps]
+        Foo = "00000000-0000-0000-0000-000000000011"
+
+        [sources]
+        Foo = { path = \"/tmp/old-foo\" }
+        """,
+    )
+
+    baseline_project = Dict{String, Any}(
+        "deps" => Dict{String, Any}("Foo" => "00000000-0000-0000-0000-000000000011"),
+        "sources" => Dict{String, Any}("Foo" => Dict{String, Any}("path" => "/tmp/new-foo")),
+    )
+
+    @test GPUEnv._restore_overlay_sources!(project_path, baseline_project)
+
+    restored = TOML.parsefile(project_path)
+    @test restored["sources"]["Foo"]["path"] == "/tmp/new-foo"
 end
 
 @testitem "_install_backend! returns false for unknown backend" begin
@@ -297,6 +337,56 @@ end
     finally
         prev === nothing || Pkg.activate(dirname(prev))
     end
+end
+
+@testitem "_install_packages! returns false when batch install fails" begin
+    using GPUEnv
+    using Pkg
+    using Test
+
+    env_dir = mktempdir()
+    write(joinpath(env_dir, "Project.toml"), "name = \"PkgBatchInstallFailure\"\nuuid = \"00000000-0000-0000-0000-000000000095\"\n")
+    prev = Base.active_project()
+    try
+        Pkg.activate(env_dir)
+        @test GPUEnv._install_packages!(["DefinitelyNotARegisteredPackageXYZ"], devnull) == false
+    finally
+        prev === nothing || Pkg.activate(dirname(prev))
+    end
+end
+
+@testitem "_install_backends! warns for unknown backends and falls back to individual installs" begin
+    using GPUEnv
+    using Test
+
+    mutable struct FallbackInstallIO <: IO
+        batch_attempts::Vector{Vector{String}}
+        individual_attempts::Vector{String}
+    end
+    FallbackInstallIO() = FallbackInstallIO(Vector{Vector{String}}(), String[])
+
+    @eval GPUEnv begin
+        function _install_packages!(package_names::AbstractVector{<:AbstractString}, io::$FallbackInstallIO)
+            push!(io.batch_attempts, collect(String.(package_names)))
+            return false
+        end
+
+        function _install_package!(package_name::AbstractString, io::$FallbackInstallIO)
+            push!(io.individual_attempts, package_name)
+            return package_name == "JLArrays"
+        end
+    end
+
+    io = FallbackInstallIO()
+    @test_logs (:warn, r"Some of the requested backends do not have known packages to install") (
+        :warn,
+        r"Failed to install backend package",
+    ) begin
+        @test GPUEnv._install_backends!([:JLArrays, :NoSuchBackend, :CUDA], io) == [:JLArrays]
+    end
+
+    @test io.batch_attempts == [["JLArrays", "CUDA"]]
+    @test io.individual_attempts == ["JLArrays", "CUDA"]
 end
 
 @testitem "_remove_package! returns false for missing package" begin
@@ -467,8 +557,69 @@ end
 
     augmented = GPUEnv._augment_source_project(project_data, root, manifest_path)
 
+    @test augmented["sources"]["LocalDep"]["path"] == abspath(dep_root)
     @test augmented["deps"]["ExtraDep"] == "00000000-0000-0000-0000-000000000131"
     @test augmented["sources"]["ExtraDep"]["path"] == abspath(extra_root)
+end
+
+@testitem "_augment_source_project falls back to workspace manifest paths" begin
+    using GPUEnv
+    using Test
+
+    root = mktempdir()
+    write(
+        joinpath(root, "Project.toml"),
+        """
+        name = "WorkspaceRoot"
+        uuid = "00000000-0000-0000-0000-000000000140"
+
+        [workspace]
+        projects = ["benchmark", "LocalDep"]
+        """,
+    )
+
+    dep_root = mkpath(joinpath(root, "LocalDep"))
+    write(
+        joinpath(dep_root, "Project.toml"),
+        """
+        name = "LocalDep"
+        uuid = "00000000-0000-0000-0000-000000000141"
+        version = "0.1.0"
+        """,
+    )
+
+    benchmark_root = mkpath(joinpath(root, "benchmark"))
+    write(
+        joinpath(benchmark_root, "Project.toml"),
+        """
+        name = "BenchmarkEnv"
+        uuid = "00000000-0000-0000-0000-000000000142"
+
+        [deps]
+        LocalDep = "00000000-0000-0000-0000-000000000141"
+        """,
+    )
+    write(joinpath(benchmark_root, "Manifest.toml"), "manifest_format = \"2.0\"\n")
+
+    write(
+        joinpath(root, "Manifest.toml"),
+        """
+        manifest_format = "2.0"
+
+        [[deps.LocalDep]]
+        path = "LocalDep"
+        uuid = "00000000-0000-0000-0000-000000000141"
+        version = "0.1.0"
+        """,
+    )
+
+    project_data = Dict{String, Any}(
+        "deps" => Dict{String, Any}("LocalDep" => "00000000-0000-0000-0000-000000000141"),
+    )
+
+    augmented = GPUEnv._augment_source_project(project_data, benchmark_root, joinpath(benchmark_root, "Manifest.toml"))
+
+    @test augmented["sources"]["LocalDep"]["path"] == abspath(dep_root)
 end
 
 @testitem "_git_repo_root finds .git directory at parent" begin
@@ -579,7 +730,7 @@ end
         probe = backend -> backend === :JLArrays,
         checker = _ -> false,
     )
-    @test :JLArrays in result.installed_backends
+    @test isempty(result.installed_backends)
     @test isempty(result.functional_backends)
 end
 

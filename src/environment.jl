@@ -226,16 +226,14 @@ function _sync_active_project_env_impl(
 
     source_root = dirname(active_project)
     source_project = _rewrite_sources(TOML.parsefile(active_project), source_root)
-    # Fall back to the workspace manifest when there is no local Manifest.toml
-    # (e.g. when the active project is a workspace member whose manifest is managed
-    # at the workspace root).  This ensures that path-based dev packages (like
-    # GPUEnv itself during development) are already resolved in the overlay env.
-    # For nested test/ or benchmark/ subdirectories, also check parent directories
-    # to enable parent dependency inheritance.
-    source_manifest = _preferred_manifest_path(source_root)
-    source_manifest === nothing && (source_manifest = _workspace_manifest_path(source_root))
+    # Prefer the workspace manifest for workspace members so copied manifests stay
+    # consistent with sibling path dependencies inherited from the workspace.
+    # Fall back to a local manifest or a parent manifest for non-workspace setups.
+    source_manifest = _workspace_manifest_path(source_root)
+    source_manifest === nothing && (source_manifest = _preferred_manifest_path(source_root))
     source_manifest === nothing && (source_manifest = _find_parent_manifest_path(source_root))
     source_project = _augment_source_project(source_project, source_root, source_manifest)
+    source_project = _localize_running_package_source(source_project)
 
     requested = _filter_backends(
         predict_backends(
@@ -247,8 +245,7 @@ function _sync_active_project_env_impl(
         exclude,
     )
 
-    project_with_backends = _merge_backend_entries(source_project, requested)
-    sync_project_data = _sanitize_environment_project(project_with_backends)
+    sync_project_data = _sanitize_environment_project(_merge_backend_entries(source_project, requested))
 
     env_dir, persisted = _environment_dir(
         source_root;
@@ -286,9 +283,12 @@ function _sync_active_project_env_impl(
         if reusable
             installed = copy(requested)
         else
+            _develop_overlay_path_sources!(sync_project_data, io)
             installed, functional = _install_and_filter_backends!(requested, checker, only_first, io)
+            _restore_overlay_sources!(project_path, sync_project_data)
             Pkg.instantiate(; io = io)
             Pkg.precompile(; io = io)
+            sync_state["project_toml"] = read(project_path, String)
             persisted && _write_sync_state!(env_dir, sync_state)
             restore_previous_project || _load_functional_backends!(functional)
 
@@ -350,8 +350,8 @@ function _sync_env_from_path_impl(
     isfile(source_project_path) || error("No Project.toml found at path: $(source_project_path)")
 
     source_project = _rewrite_sources(TOML.parsefile(source_project_path), root)
-    source_manifest = _preferred_manifest_path(root)
-    source_manifest === nothing && (source_manifest = _workspace_manifest_path(root))
+    source_manifest = _workspace_manifest_path(root)
+    source_manifest === nothing && (source_manifest = _preferred_manifest_path(root))
     source_manifest === nothing && (source_manifest = _find_parent_manifest_path(root))
     source_project = _augment_source_project(source_project, root, source_manifest)
     source_project = _localize_running_package_source(source_project)
@@ -404,9 +404,12 @@ function _sync_env_from_path_impl(
         if reusable
             installed = copy(requested)
         else
+            _develop_overlay_path_sources!(sync_project_data, io)
             installed, functional = _install_and_filter_backends!(requested, checker, only_first, io)
+            _restore_overlay_sources!(project_path, sync_project_data)
             Pkg.instantiate(; io = io)
             Pkg.precompile(; io = io)
+            sync_state["project_toml"] = read(project_path, String)
             persisted && _write_sync_state!(env_dir, sync_state)
             restore_previous_project || _load_functional_backends!(functional)
 
@@ -489,26 +492,28 @@ function _install_and_filter_backends!(
         only_first::Bool,
         io::IO,
     )
-    installed = Symbol[]
     if only_first
         for backend in requested
             _install_backend!(backend, io) || continue
+            # Instantiate after each add so extension dependencies are present before
+            # we import the backend for a functional check.
+            Pkg.instantiate(; io = io)
             if checker(backend)
-                push!(installed, backend)
-                break
+                return [backend], [backend]
+            else
+                _remove_backend!(backend, io)
             end
-            _remove_backend!(backend, io)
+        end
+        return Symbol[], Symbol[]
+    else
+        installed = _install_backends!(requested, io)
+        for backend in installed
+            if !checker(backend)
+                _remove_backend!(backend, io)
+                filter!(b -> b != backend, installed)
+            end
         end
         return installed, copy(installed)
-    else
-        for backend in requested
-            _install_backend!(backend, io) && push!(installed, backend)
-        end
-        functional = resolve_backends(installed; checker = checker)
-        for backend in setdiff(installed, functional)
-            _remove_backend!(backend, io)
-        end
-        return installed, functional
     end
 end
 
@@ -563,6 +568,58 @@ function _sanitize_environment_project(project_data::Dict{String, Any})
     end
 
     return sanitized
+end
+
+function _restore_overlay_sources!(project_path::AbstractString, baseline_project::Dict{String, Any})
+    isfile(project_path) || return false
+
+    baseline_sources = get(baseline_project, "sources", nothing)
+    baseline_sources isa Dict || return false
+
+    current_project = TOML.parsefile(project_path)
+    current_deps = get(current_project, "deps", Dict{String, Any}())
+    current_deps isa Dict || return false
+
+    dep_names = Set(String.(keys(current_deps)))
+    current_sources = get!(current_project, "sources", Dict{String, Any}())
+    changed = false
+
+    for (name, value) in baseline_sources
+        name in dep_names || continue
+        if get(current_sources, name, nothing) != value
+            current_sources[name] = deepcopy(value)
+            changed = true
+        end
+    end
+
+    if changed
+        open(project_path, "w") do io
+            TOML.print(io, current_project)
+        end
+    end
+
+    return changed
+end
+
+function _develop_overlay_path_sources!(baseline_project::Dict{String, Any}, io::IO)
+    baseline_sources = get(baseline_project, "sources", nothing)
+    baseline_sources isa Dict || return false
+
+    baseline_deps = get(baseline_project, "deps", nothing)
+    baseline_deps isa Dict || return false
+
+    developed = false
+    for (name, value) in baseline_sources
+        name in keys(baseline_deps) || continue
+        value isa Dict || continue
+        path = get(value, "path", nothing)
+        path isa AbstractString || continue
+        isfile(joinpath(path, "Project.toml")) || continue
+        Pkg.develop(Pkg.PackageSpec(path = path); io = io)
+        developed = true
+    end
+
+    return developed
 end
 
 function _write_environment!(project_data::Dict{String, Any}, manifest_source::Union{Nothing, String}, env_dir::AbstractString)
@@ -633,8 +690,10 @@ function _sync_state_data(
     )
     io = IOBuffer()
     TOML.print(io, project_data)
+    project_toml = String(take!(io))
     return Dict{String, Any}(
-        "project_toml" => String(take!(io)),
+        "source_project_toml" => project_toml,
+        "project_toml" => project_toml,
         "requested_backends" => String.(requested_backends),
         "source_manifest_name" => manifest_source === nothing ? "" : basename(manifest_source),
         "source_manifest_deps" => _manifest_deps_fingerprint(manifest_source),
@@ -650,13 +709,16 @@ function _can_reuse_persisted_env(sync_state::Dict{String, Any}, env_dir::Abstra
     isfile(project_path) || return false
     isfile(state_path) || return false
     manifest_name = get(sync_state, "source_manifest_name", "")
-    if isempty(manifest_name)
-        _preferred_manifest_path(env_dir) === nothing || return false
-    else
+    if !isempty(manifest_name)
         isfile(joinpath(env_dir, manifest_name)) || return false
     end
-    read(project_path, String) == sync_state["project_toml"] || return false
-    return TOML.parsefile(state_path) == sync_state
+    stored_state = TOML.parsefile(state_path)
+    get(stored_state, "source_project_toml", nothing) == sync_state["source_project_toml"] || return false
+    get(stored_state, "requested_backends", nothing) == sync_state["requested_backends"] || return false
+    get(stored_state, "source_manifest_name", nothing) == sync_state["source_manifest_name"] || return false
+    get(stored_state, "source_manifest_deps", nothing) == sync_state["source_manifest_deps"] || return false
+    read(project_path, String) == get(stored_state, "project_toml", "") || return false
+    return true
 end
 
 function _write_sync_state!(env_dir::AbstractString, sync_state::Dict{String, Any})
@@ -747,6 +809,34 @@ function _install_backend!(backend::Symbol, io::IO)
     return _install_package!(spec.package, io)
 end
 
+function _install_backends!(backends::AbstractVector{Symbol}, io::IO)
+    specs = [get(BACKEND_SPECS, backend, nothing) for backend in backends]
+    if all(spec -> spec === nothing, specs)
+        @warn "None of the requested backends have known packages to install." requested_backends = backends
+        return Symbol[]
+    end
+    if any(spec -> spec === nothing, specs)
+        unknown_backends = [backends[i] for i in eachindex(backends) if specs[i] === nothing]
+        @warn "Some of the requested backends do not have known packages to install." unknown_backends = unknown_backends
+        specs = filter(!isnothing, specs)
+    end
+    success = _install_packages!([spec.package for spec in specs], io)
+    if success
+        return [spec.name for spec in specs]
+    else
+        installed = Symbol[]
+        for spec in specs
+            success = _install_package!(spec.package, io)
+            if success
+                push!(installed, spec.name)
+            else
+                @warn "Failed to install backend package" package = spec.package
+            end
+        end
+        return installed
+    end
+end
+
 function _remove_backend!(backend::Symbol, io::IO)
     spec = get(BACKEND_SPECS, backend, nothing)
     spec === nothing && return false
@@ -759,6 +849,15 @@ function _install_package!(package_name::AbstractString, io::IO)
         return true
     catch err
         @warn "Could not install backend package" package_name exception = (err, catch_backtrace())
+        return false
+    end
+end
+
+function _install_packages!(package_names::AbstractVector{<:AbstractString}, io::IO)
+    try
+        Pkg.add(package_names; io = io)
+        return true
+    catch err
         return false
     end
 end

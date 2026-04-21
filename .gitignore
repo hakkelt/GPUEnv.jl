@@ -1,5 +1,6 @@
 /docs/build/
 Manifest.toml
+Manifest-v*.toml
 /app/test/Manifest.toml
 /docs/Manifest.toml
 /test/Manifest.toml

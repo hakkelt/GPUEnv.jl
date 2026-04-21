@@ -112,11 +112,12 @@ end
 
 function _localize_source_path(data::Dict{String, Any}, package_name::AbstractString, package_root::AbstractString)
     rewritten = deepcopy(data)
-    sources = get(rewritten, "sources", nothing)
-    sources isa Dict || return rewritten
+    deps = get(rewritten, "deps", nothing)
+    deps isa Dict || return rewritten
+    haskey(deps, package_name) || return rewritten
 
-    spec = get(sources, package_name, nothing)
-    spec isa Dict || return rewritten
+    sources = get!(rewritten, "sources", Dict{String, Any}())
+    spec = get!(sources, package_name, Dict{String, Any}())
     spec["path"] = abspath(package_root)
     pop!(spec, "url", nothing)
     pop!(spec, "rev", nothing)
@@ -199,6 +200,21 @@ function _path_project_records(project_data::Dict{String, Any}, manifest_source:
     return projects
 end
 
+function _path_project_records(
+        project_data::Dict{String, Any},
+        manifest_sources::AbstractVector{<:AbstractString},
+    )
+    projects = Dict{String, String}()
+
+    for manifest_source in manifest_sources
+        for (package_name, package_root) in _path_project_records(project_data, manifest_source)
+            projects[package_name] = package_root
+        end
+    end
+
+    return collect(pairs(projects))
+end
+
 function _augment_source_project(
         project_data::Dict{String, Any},
         source_root::AbstractString,
@@ -221,8 +237,25 @@ function _augment_source_project(
         end
     end
 
-    for (package_name, package_root) in _path_project_records(project_data, manifest_source)
+    manifest_sources = String[]
+    manifest_source !== nothing && push!(manifest_sources, abspath(manifest_source))
+
+    workspace_manifest = _workspace_manifest_path(source_root)
+    if workspace_manifest !== nothing
+        workspace_manifest = abspath(workspace_manifest)
+        workspace_manifest in manifest_sources || push!(manifest_sources, workspace_manifest)
+    end
+
+    parent_manifest = _find_parent_manifest_path(source_root)
+    if parent_manifest !== nothing
+        parent_manifest = abspath(parent_manifest)
+        parent_manifest in manifest_sources || push!(manifest_sources, parent_manifest)
+    end
+
+    for (package_name, package_root) in _path_project_records(project_data, manifest_sources)
         package_name in excluded && continue
+        merged_sources = get!(merged, "sources", Dict{String, Any}())
+        merged_sources[package_name] = Dict{String, Any}("path" => abspath(package_root))
         package_data = _rewrite_sources(TOML.parsefile(joinpath(package_root, "Project.toml")), package_root)
         merged = _merge_project_tables(merged, package_data; exclude_packages = excluded)
     end

@@ -103,6 +103,23 @@ end
             probe = backend -> backend == :JLArrays,
             checker = _ -> true,
         )
+
+        source_root = dirname(active_before)
+        source_project = GPUEnv._rewrite_sources(TOML.parsefile(active_before), source_root)
+        source_project = GPUEnv._augment_source_project(source_project, source_root, nothing)
+        source_project = GPUEnv._localize_running_package_source(source_project)
+        requested = GPUEnv._filter_backends(
+            GPUEnv.predict_backends(
+                ;
+                include_jlarrays = true,
+                probe = backend -> backend == :JLArrays,
+                backends_to_test = Symbol[],
+            ),
+            Symbol[],
+        )
+        sync_project_data = GPUEnv._sanitize_environment_project(GPUEnv._merge_backend_entries(source_project, requested))
+        sync_state = GPUEnv._sync_state_data(sync_project_data, nothing, requested)
+
         second_result = GPUEnv.sync_test_env(
             ;
             persist = true,
@@ -113,6 +130,7 @@ end
         )
 
         @test :JLArrays in first_result.functional_backends
+        @test GPUEnv._can_reuse_persisted_env(sync_state, env_dir; persisted = true)
         @test second_result.installed_backends == second_result.requested_backends
         @test second_result.installed_backends == [:JLArrays]
         @test second_result.functional_backends == [:JLArrays]
@@ -146,9 +164,13 @@ end
 
         source_project = GPUEnv._rewrite_sources(TOML.parsefile(active_before), active_root)
         source_project = GPUEnv._augment_source_project(source_project, active_root, nothing)
-        sync_project_data = GPUEnv._sanitize_environment_project(GPUEnv._merge_backend_entries(source_project, [:JLArrays]))
+        sync_project_data = GPUEnv._sanitize_environment_project(source_project)
         sync_state = GPUEnv._sync_state_data(sync_project_data, nothing, [:JLArrays])
         GPUEnv._write_environment!(sync_project_data, nothing, env_dir)
+        Pkg.activate(env_dir)
+        Pkg.add("JLArrays"; io = devnull)
+        sync_state["project_toml"] = read(joinpath(env_dir, "Project.toml"), String)
+        Pkg.activate(active_root)
         GPUEnv._write_sync_state!(env_dir, sync_state)
 
         result = GPUEnv._sync_active_project_env_impl(
@@ -178,6 +200,7 @@ end
 
 @testitem "sync_test_env reuses persisted path-based env" setup = [SyncTestHelpers] begin
     using GPUEnv
+    using TOML
     using Test
 
     root = make_fake_package()
@@ -192,6 +215,22 @@ end
         probe = backend -> backend == :JLArrays,
         checker = _ -> true,
     )
+
+    source_project = GPUEnv._rewrite_sources(TOML.parsefile(joinpath(root, "Project.toml")), root)
+    source_project = GPUEnv._augment_source_project(source_project, root, nothing)
+    source_project = GPUEnv._localize_running_package_source(source_project)
+    requested = GPUEnv._filter_backends(
+        GPUEnv.predict_backends(
+            ;
+            include_jlarrays = true,
+            probe = backend -> backend == :JLArrays,
+            backends_to_test = Symbol[],
+        ),
+        Symbol[],
+    )
+    sync_project_data = GPUEnv._sanitize_environment_project(GPUEnv._merge_backend_entries(source_project, requested))
+    sync_state = GPUEnv._sync_state_data(sync_project_data, nothing, requested)
+
     second_result = GPUEnv.sync_test_env(
         ;
         path = root,
@@ -203,6 +242,7 @@ end
     )
 
     @test :JLArrays in first_result.functional_backends
+    @test GPUEnv._can_reuse_persisted_env(sync_state, env_dir; persisted = true)
     @test second_result.installed_backends == second_result.requested_backends
     @test second_result.installed_backends == [:JLArrays]
     @test second_result.functional_backends == [:JLArrays]
@@ -210,18 +250,24 @@ end
 
 @testitem "_sync_env_from_path_impl reuses persisted env" setup = [SyncTestHelpers] begin
     using GPUEnv
+    using Pkg
     using Test
     using TOML
 
     root = make_fake_package()
     env_dir = mktempdir()
+    active_before = Base.active_project()
 
     source_project = GPUEnv._rewrite_sources(TOML.parsefile(joinpath(root, "Project.toml")), root)
     source_project = GPUEnv._augment_source_project(source_project, root, nothing)
     source_project = GPUEnv._localize_running_package_source(source_project)
-    sync_project_data = GPUEnv._sanitize_environment_project(GPUEnv._merge_backend_entries(source_project, [:JLArrays]))
+    sync_project_data = GPUEnv._sanitize_environment_project(source_project)
     sync_state = GPUEnv._sync_state_data(sync_project_data, nothing, [:JLArrays])
     GPUEnv._write_environment!(sync_project_data, nothing, env_dir)
+    Pkg.activate(env_dir)
+    Pkg.add("JLArrays"; io = devnull)
+    sync_state["project_toml"] = read(joinpath(env_dir, "Project.toml"), String)
+    active_before === nothing || Pkg.activate(dirname(active_before))
     GPUEnv._write_sync_state!(env_dir, sync_state)
 
     result = GPUEnv._sync_env_from_path_impl(
@@ -264,6 +310,26 @@ end
     @test normpath(source["path"]) == dirname(dirname(pathof(GPUEnv)))
     @test !haskey(source, "url")
     @test !haskey(source, "rev")
+end
+
+@testitem "sync_test_env preserves sources after backend installation" setup = [SyncTestHelpers] begin
+    using GPUEnv
+    using TOML
+    using Test
+
+    root = make_fake_package(; GPUEnv_source = :url)
+    result = GPUEnv.sync_test_env(
+        ;
+        path = joinpath(root, "test"),
+        include_jlarrays = true,
+        probe = backend -> backend == :JLArrays,
+        checker = _ -> true,
+    )
+
+    data = TOML.parsefile(result.project_path)
+
+    @test data["sources"]["Foo"]["path"] == abspath(joinpath(root, "Foo"))
+    @test normpath(data["sources"]["GPUEnv"]["path"]) == dirname(dirname(pathof(GPUEnv)))
 end
 
 @testitem "Target-based project can be overlay source" setup = [SyncTestHelpers] begin
