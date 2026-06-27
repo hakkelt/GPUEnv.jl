@@ -864,6 +864,315 @@ end
     @test haskey(project_data, "weakdeps")
 end
 
+@testitem "_develop_overlay_path_sources! catches Pkg.develop failure and returns false" begin
+    using GPUEnv
+    using Pkg
+    using Test
+
+    # A Project.toml with a malformed uuid causes Pkg.develop to throw an
+    # ArgumentError on any Julia version, driving the catch block at line 657.
+    pkg_dir = mktempdir()
+    write(
+        joinpath(pkg_dir, "Project.toml"),
+        "name = \"BadUUIDPkg\"\nuuid = \"not-a-valid-uuid\"\n",
+    )
+
+    overlay_dir = mktempdir()
+    write(
+        joinpath(overlay_dir, "Project.toml"),
+        "name = \"Overlay\"\nuuid = \"00000000-0000-0000-0000-000000000070\"\n",
+    )
+
+    baseline_project = Dict{String, Any}(
+        "deps" => Dict{String, Any}("BadUUIDPkg" => "00000000-0000-0000-0000-000000000071"),
+        "sources" => Dict{String, Any}(
+            "BadUUIDPkg" => Dict{String, Any}("path" => pkg_dir),
+        ),
+    )
+
+    prev = Base.active_project()
+    try
+        Pkg.activate(overlay_dir)
+        developed = GPUEnv._develop_overlay_path_sources!(baseline_project, devnull)
+        @test developed == false
+    finally
+        prev === nothing || Pkg.activate(dirname(prev))
+    end
+end
+
+@testitem "activate pushes stripped local-pkg root to LOAD_PATH on Julia < 1.11 (path variant)" begin
+    # Lines 429-431 in environment.jl are only reachable on Julia < 1.11.
+    # The `if` gates the whole body so this is a no-op on Julia 1.11+.
+    if VERSION < v"1.11"
+        using GPUEnv
+        using Pkg
+        using Test
+
+        root = mktempdir()
+        mkpath(joinpath(root, "src"))
+        write(joinpath(root, "src", "FakePkg.jl"), "module FakePkg\nend\n")
+
+        local_pkg = mkpath(joinpath(root, "LocalDep"))
+        write(
+            joinpath(local_pkg, "Project.toml"),
+            "name = \"LocalDep\"\nuuid = \"00000000-0000-0000-0000-000000000072\"\nversion = \"0.1.0\"\n",
+        )
+
+        write(
+            joinpath(root, "Project.toml"),
+            """
+            name = "FakePkg"
+            uuid = "00000000-0000-0000-0000-000000000073"
+            version = "0.1.0"
+
+            [deps]
+            LocalDep = "00000000-0000-0000-0000-000000000072"
+
+            [compat]
+            julia = "1.10"
+            """,
+        )
+        write(
+            joinpath(root, "Manifest.toml"),
+            """
+            manifest_format = "2.0"
+
+            [[deps.LocalDep]]
+            path = "LocalDep"
+            uuid = "00000000-0000-0000-0000-000000000072"
+            version = "0.1.0"
+            """,
+        )
+
+        original_load_path = copy(Base.LOAD_PATH)
+        prev = Base.active_project()
+        try
+            # activate passes restore_previous_project = dry_run = false, enabling
+            # the LOAD_PATH push at lines 429-431 of environment.jl.
+            GPUEnv.activate(
+                ;
+                path = root,
+                include_jlarrays = false,
+                probe = _ -> false,
+            )
+            @test abspath(local_pkg) in Base.LOAD_PATH
+        finally
+            prev === nothing || Pkg.activate(dirname(prev))
+            empty!(Base.LOAD_PATH)
+            append!(Base.LOAD_PATH, original_load_path)
+        end
+    end
+end
+
+@testitem "activate pushes stripped local-pkg root to LOAD_PATH on Julia < 1.11 (active project / workspace variant)" begin
+    # Lines 258 and 302-304 in environment.jl are only reachable on Julia < 1.11.
+    # Line 258 executes when the workspace manifest differs from the local (test/)
+    # manifest: the workspace manifest is used first, then the local manifest is
+    # checked separately for additional path-only deps.
+    # The `if` gates the whole body so this is a no-op on Julia 1.11+.
+    if VERSION < v"1.11"
+        using GPUEnv
+        using Pkg
+        using Test
+
+        # Workspace root — Manifest intentionally has no path deps so the first strip
+        # call finds nothing.
+        root = mktempdir()
+        write(
+            joinpath(root, "Project.toml"),
+            "[workspace]\nprojects = [\"test\"]\n",
+        )
+        write(joinpath(root, "Manifest.toml"), "manifest_format = \"2.0\"\n")
+
+        # Local sub-package referenced only from the test/ Manifest.
+        local_pkg = mkpath(joinpath(root, "LocalDep"))
+        write(
+            joinpath(local_pkg, "Project.toml"),
+            "name = \"LocalDep\"\nuuid = \"00000000-0000-0000-0000-000000000074\"\nversion = \"0.1.0\"\n",
+        )
+
+        # Test project — lists LocalDep as a dep, and its Manifest marks it as path-only.
+        test_dir = mkpath(joinpath(root, "test"))
+        write(
+            joinpath(test_dir, "Project.toml"),
+            """
+            [deps]
+            LocalDep = "00000000-0000-0000-0000-000000000074"
+            """,
+        )
+        write(
+            joinpath(test_dir, "Manifest.toml"),
+            """
+            manifest_format = "2.0"
+
+            [[deps.LocalDep]]
+            path = "../LocalDep"
+            uuid = "00000000-0000-0000-0000-000000000074"
+            version = "0.1.0"
+            """,
+        )
+
+        original_load_path = copy(Base.LOAD_PATH)
+        prev = Base.active_project()
+        try
+            Pkg.activate(test_dir)
+            # activate passes restore_previous_project = false, so after activation:
+            # line 258 runs the second _strip_unregistered_path_deps! call (for the
+            # local test Manifest that differs from the workspace Manifest), and
+            # lines 302-304 push the stripped package root onto Base.LOAD_PATH.
+            GPUEnv.activate(
+                ;
+                include_jlarrays = false,
+                probe = _ -> false,
+            )
+            @test abspath(local_pkg) in Base.LOAD_PATH
+        finally
+            prev === nothing || Pkg.activate(dirname(prev))
+            empty!(Base.LOAD_PATH)
+            append!(Base.LOAD_PATH, original_load_path)
+        end
+    end
+end
+
+@testitem "_strip_unregistered_path_deps! removes path-only dep and returns its path" begin
+    using GPUEnv
+    using Test
+
+    manifest_dir = mktempdir()
+    pkg_dir = mkpath(joinpath(manifest_dir, "LocalPkg"))
+    manifest_path = joinpath(manifest_dir, "Manifest.toml")
+    write(
+        manifest_path,
+        """
+        manifest_format = "2.0"
+
+        [[deps.LocalPkg]]
+        path = "LocalPkg"
+        uuid = "00000000-0000-0000-0000-000000000050"
+        version = "0.1.0"
+        """,
+    )
+
+    project_data = Dict{String, Any}(
+        "deps" => Dict{String, Any}(
+            "LocalPkg" => "00000000-0000-0000-0000-000000000050",
+            "RegisteredPkg" => "00000000-0000-0000-0000-000000000051",
+        ),
+        "compat" => Dict{String, Any}("LocalPkg" => "0.1", "RegisteredPkg" => "1"),
+    )
+
+    stripped = GPUEnv._strip_unregistered_path_deps!(project_data, manifest_path)
+
+    @test !haskey(project_data["deps"], "LocalPkg")
+    @test haskey(project_data["deps"], "RegisteredPkg")
+    @test !haskey(project_data["compat"], "LocalPkg")
+    @test haskey(project_data["compat"], "RegisteredPkg")
+    @test stripped == [abspath(pkg_dir)]
+end
+
+@testitem "_strip_unregistered_path_deps! also cleans sources entry" begin
+    using GPUEnv
+    using Test
+
+    manifest_dir = mktempdir()
+    pkg_dir = mkpath(joinpath(manifest_dir, "LocalPkg"))
+    manifest_path = joinpath(manifest_dir, "Manifest.toml")
+    write(
+        manifest_path,
+        """
+        manifest_format = "2.0"
+
+        [[deps.LocalPkg]]
+        path = "LocalPkg"
+        uuid = "00000000-0000-0000-0000-000000000052"
+        """,
+    )
+
+    project_data = Dict{String, Any}(
+        "deps" => Dict{String, Any}("LocalPkg" => "00000000-0000-0000-0000-000000000052"),
+        "sources" => Dict{String, Any}(
+            "LocalPkg" => Dict{String, Any}("path" => abspath(pkg_dir)),
+        ),
+    )
+
+    GPUEnv._strip_unregistered_path_deps!(project_data, manifest_path)
+
+    @test !haskey(project_data["deps"], "LocalPkg")
+    @test !haskey(project_data["sources"], "LocalPkg")
+end
+
+@testitem "_strip_unregistered_path_deps! keeps deps that have a git-tree-sha1" begin
+    using GPUEnv
+    using Test
+
+    manifest_dir = mktempdir()
+    manifest_path = joinpath(manifest_dir, "Manifest.toml")
+    write(
+        manifest_path,
+        """
+        manifest_format = "2.0"
+
+        [[deps.PinnedPkg]]
+        path = "PinnedPkg"
+        git-tree-sha1 = "aabbccdd"
+        uuid = "00000000-0000-0000-0000-000000000053"
+        version = "1.0.0"
+        """,
+    )
+
+    project_data = Dict{String, Any}(
+        "deps" => Dict{String, Any}("PinnedPkg" => "00000000-0000-0000-0000-000000000053"),
+    )
+
+    stripped = GPUEnv._strip_unregistered_path_deps!(project_data, manifest_path)
+
+    @test haskey(project_data["deps"], "PinnedPkg")
+    @test isempty(stripped)
+end
+
+@testitem "_strip_unregistered_path_deps! is a no-op for missing manifest" begin
+    using GPUEnv
+    using Test
+
+    project_data = Dict{String, Any}(
+        "deps" => Dict{String, Any}("Foo" => "00000000-0000-0000-0000-000000000054"),
+    )
+
+    stripped_nothing = GPUEnv._strip_unregistered_path_deps!(project_data, nothing)
+    stripped_missing = GPUEnv._strip_unregistered_path_deps!(project_data, "/nonexistent/Manifest.toml")
+
+    @test isempty(stripped_nothing)
+    @test isempty(stripped_missing)
+    @test haskey(project_data["deps"], "Foo")
+end
+
+@testitem "_strip_unregistered_path_deps! ignores deps not in project" begin
+    using GPUEnv
+    using Test
+
+    manifest_dir = mktempdir()
+    manifest_path = joinpath(manifest_dir, "Manifest.toml")
+    write(
+        manifest_path,
+        """
+        manifest_format = "2.0"
+
+        [[deps.TransitivePkg]]
+        path = "TransitivePkg"
+        uuid = "00000000-0000-0000-0000-000000000055"
+        """,
+    )
+
+    project_data = Dict{String, Any}(
+        "deps" => Dict{String, Any}("DirectPkg" => "00000000-0000-0000-0000-000000000056"),
+    )
+
+    stripped = GPUEnv._strip_unregistered_path_deps!(project_data, manifest_path)
+
+    @test haskey(project_data["deps"], "DirectPkg")
+    @test isempty(stripped)
+end
+
 @testitem "_write_environment! copies manifest even when local path sources exist" begin
     using GPUEnv
     using Test

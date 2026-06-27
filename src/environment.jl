@@ -246,6 +246,22 @@ function _sync_active_project_env_impl(
     )
 
     sync_project_data = _sanitize_environment_project(_merge_backend_entries(source_project, requested))
+    # On Julia 1.10: strip unregistered path-only packages from the overlay deps.
+    # The workspace Manifest (used as source_manifest) omits the root package
+    # itself, so we also check the local manifest next to the active project file.
+    # Returned paths are pushed to LOAD_PATH after overlay activation so those
+    # packages remain findable even though they are absent from the overlay deps.
+    stripped_paths = if VERSION < v"1.11"
+        paths = _strip_unregistered_path_deps!(sync_project_data, source_manifest)
+        let local_manifest = _preferred_manifest_path(source_root)
+            if local_manifest != source_manifest
+                append!(paths, _strip_unregistered_path_deps!(sync_project_data, local_manifest))
+            end
+        end
+        unique!(paths)
+    else
+        String[]
+    end
 
     env_dir, persisted = _environment_dir(
         source_root;
@@ -279,6 +295,14 @@ function _sync_active_project_env_impl(
     success = false
     try
         Pkg.activate(env_dir; io = io)
+        # Packages stripped from overlay deps (e.g., the root workspace package on
+        # Julia 1.10) are no longer in the overlay env.  Push their project dirs to
+        # LOAD_PATH so Julia can still find them via the original manifest's path entry.
+        if !isempty(stripped_paths) && !restore_previous_project
+            for pkg_path in stripped_paths
+                pkg_path in Base.LOAD_PATH || push!(Base.LOAD_PATH, pkg_path)
+            end
+        end
 
         if reusable
             installed = copy(requested)
@@ -367,6 +391,7 @@ function _sync_env_from_path_impl(
     )
 
     sync_project_data = _sanitize_environment_project(_merge_backend_entries(source_project, requested))
+    stripped_paths = VERSION < v"1.11" ? _strip_unregistered_path_deps!(sync_project_data, source_manifest) : String[]
 
     env_dir, persisted = _environment_dir(
         root;
@@ -400,6 +425,11 @@ function _sync_env_from_path_impl(
     success = false
     try
         Pkg.activate(env_dir; io = io)
+        if !isempty(stripped_paths) && !restore_previous_project
+            for pkg_path in stripped_paths
+                pkg_path in Base.LOAD_PATH || push!(Base.LOAD_PATH, pkg_path)
+            end
+        end
 
         if reusable
             installed = copy(requested)
@@ -615,11 +645,59 @@ function _develop_overlay_path_sources!(baseline_project::Dict{String, Any}, io:
         path = get(value, "path", nothing)
         path isa AbstractString || continue
         isfile(joinpath(path, "Project.toml")) || continue
-        Pkg.develop(Pkg.PackageSpec(path = path); io = io)
-        developed = true
+        try
+            Pkg.develop(Pkg.PackageSpec(path = path); io = io)
+            developed = true
+        catch e
+            # On Julia 1.10, Pkg.develop calls check_registered even for path-
+            # based specs, which fails for packages not in any registry.  Skip:
+            # the package is already reachable via the original LOAD_PATH entry
+            # from the test environment, so the package extension will still
+            # load correctly without re-developing it in the overlay.
+            @debug "GPUEnv: skipping Pkg.develop for path source '$name' (Julia 1.10 compat): $e"
+        end
     end
 
     return developed
+end
+
+# On Julia 1.10, Pkg.add / targeted_resolve calls check_registered on ALL
+# packages in [deps], and that check fails for any unregistered local package
+# (one with a path entry and no git-tree-sha1 in the manifest).  The workspace
+# manifest is used as source_manifest by _augment_source_project, but the root
+# package never appears in its own workspace manifest, so the test-local
+# manifest must also be checked.  We strip such packages from the overlay
+# project's [deps] (and compat) before writing it to disk, and return their
+# absolute paths so callers can add the source root back to LOAD_PATH to keep
+# those packages findable after the overlay is activated.
+function _strip_unregistered_path_deps!(project_data::Dict{String, Any}, manifest_source::Union{Nothing, AbstractString})
+    stripped_paths = String[]
+    manifest_source === nothing && return stripped_paths
+    isfile(manifest_source) || return stripped_paths
+
+    manifest_dir = dirname(abspath(manifest_source))
+    manifest_deps_raw = get(TOML.parsefile(manifest_source), "deps", nothing)
+    manifest_deps_raw isa Dict || return stripped_paths
+
+    project_deps = get(project_data, "deps", nothing)
+    project_deps isa Dict || return stripped_paths
+
+    for (name, records) in manifest_deps_raw
+        haskey(project_deps, name) || continue
+        record = records isa Vector ? first(records) : records
+        record isa Dict || continue
+        rel_path = get(record, "path", nothing)
+        rel_path isa AbstractString || continue
+        get(record, "git-tree-sha1", nothing) === nothing || continue
+        abs_path = normpath(joinpath(manifest_dir, rel_path))
+        delete!(project_deps, name)
+        sources = get(project_data, "sources", nothing)
+        sources isa Dict && delete!(sources, name)
+        compat = get(project_data, "compat", nothing)
+        compat isa Dict && delete!(compat, name)
+        push!(stripped_paths, abs_path)
+    end
+    return stripped_paths
 end
 
 function _write_environment!(project_data::Dict{String, Any}, manifest_source::Union{Nothing, String}, env_dir::AbstractString)

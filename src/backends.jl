@@ -727,16 +727,24 @@ function _detect_macos_gpu_hardware!(
 end
 
 function _fallback_backend_probe(backend::Symbol)
-    if backend === :CUDA
-        return Sys.which("nvidia-smi") !== nothing
-    elseif backend === :AMDGPU
-        return Sys.which("rocminfo") !== nothing || Sys.which("rocm-smi") !== nothing
-    elseif backend === :Metal
-        return Sys.isapple()
-    elseif backend === :oneAPI
-        return Sys.which("sycl-ls") !== nothing || Sys.which("icpx") !== nothing || Sys.which("dpcpp") !== nothing
-    elseif backend === :OpenCL
-        return Sys.which("clinfo") !== nothing
+    # Sys.which iterates PATH and calls stat() on each candidate.  On Julia 1.10
+    # a broken filesystem entry in PATH (e.g. ENOTCONN on a disconnected socket
+    # mount) causes stat() to throw rather than returning nothing.  Catch any
+    # exception and treat it as "tool not found".
+    try
+        if backend === :CUDA
+            return Sys.which("nvidia-smi") !== nothing
+        elseif backend === :AMDGPU
+            return Sys.which("rocminfo") !== nothing || Sys.which("rocm-smi") !== nothing
+        elseif backend === :Metal
+            return Sys.isapple()
+        elseif backend === :oneAPI
+            return Sys.which("sycl-ls") !== nothing || Sys.which("icpx") !== nothing || Sys.which("dpcpp") !== nothing
+        elseif backend === :OpenCL
+            return Sys.which("clinfo") !== nothing
+        end
+    catch
+        return false
     end
 
     return false
