@@ -4,7 +4,7 @@ end
 
 function _manifest_candidates(dir::AbstractString)
     candidates = String[]
-    if VERSION >= v"1.11"
+    @static if VERSION >= v"1.11"
         push!(candidates, joinpath(dir, "Manifest-v$(VERSION.major).$(VERSION.minor).toml"))
     end
     push!(candidates, joinpath(dir, "Manifest.toml"))

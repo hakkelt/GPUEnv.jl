@@ -309,6 +309,34 @@ end
     @test restored["sources"]["Foo"]["path"] == "/tmp/new-foo"
 end
 
+@testitem "_restore_overlay_sources! returns false when nothing changed" begin
+    using GPUEnv
+    using TOML
+    using Test
+
+    env_dir = mktempdir()
+    project_path = joinpath(env_dir, "Project.toml")
+    write(
+        project_path,
+        """
+        [deps]
+        Foo = "00000000-0000-0000-0000-000000000011"
+
+        [sources]
+        Foo = { path = \"/tmp/same-foo\" }
+        """,
+    )
+
+    baseline_project = Dict{String, Any}(
+        "deps" => Dict{String, Any}("Foo" => "00000000-0000-0000-0000-000000000011"),
+        "sources" => Dict{String, Any}("Foo" => Dict{String, Any}("path" => "/tmp/same-foo")),
+    )
+
+    before = read(project_path, String)
+    @test GPUEnv._restore_overlay_sources!(project_path, baseline_project) == false
+    @test read(project_path, String) == before
+end
+
 @testitem "_install_backend! returns false for unknown backend" begin
     using GPUEnv
     using Test
@@ -895,6 +923,107 @@ end
         Pkg.activate(overlay_dir)
         developed = GPUEnv._develop_overlay_path_sources!(baseline_project, devnull)
         @test developed == false
+    finally
+        prev === nothing || Pkg.activate(dirname(prev))
+    end
+end
+
+@testitem "_develop_overlay_path_sources! develops multiple path sources in one batched call" begin
+    using GPUEnv
+    using Pkg
+    using TOML
+    using Test
+
+    function make_pkg_dir(name, uuid)
+        dir = mktempdir()
+        write(joinpath(dir, "Project.toml"), "name = \"$name\"\nuuid = \"$uuid\"\nversion = \"0.1.0\"\n")
+        mkpath(joinpath(dir, "src"))
+        write(joinpath(dir, "src", "$name.jl"), "module $name\nend\n")
+        return dir
+    end
+
+    pkg_dir_a = make_pkg_dir("BatchPkgA", "00000000-0000-0000-0000-000000000072")
+    pkg_dir_b = make_pkg_dir("BatchPkgB", "00000000-0000-0000-0000-000000000073")
+
+    overlay_dir = mktempdir()
+    write(
+        joinpath(overlay_dir, "Project.toml"),
+        "name = \"Overlay\"\nuuid = \"00000000-0000-0000-0000-000000000074\"\n",
+    )
+
+    baseline_project = Dict{String, Any}(
+        "deps" => Dict{String, Any}(
+            "BatchPkgA" => "00000000-0000-0000-0000-000000000072",
+            "BatchPkgB" => "00000000-0000-0000-0000-000000000073",
+        ),
+        "sources" => Dict{String, Any}(
+            "BatchPkgA" => Dict{String, Any}("path" => pkg_dir_a),
+            "BatchPkgB" => Dict{String, Any}("path" => pkg_dir_b),
+        ),
+    )
+
+    prev = Base.active_project()
+    try
+        Pkg.activate(overlay_dir)
+        developed = GPUEnv._develop_overlay_path_sources!(baseline_project, devnull)
+        @test developed == true
+
+        overlay_project = TOML.parsefile(joinpath(overlay_dir, "Project.toml"))
+        @test haskey(get(overlay_project, "deps", Dict()), "BatchPkgA")
+        @test haskey(get(overlay_project, "deps", Dict()), "BatchPkgB")
+    finally
+        prev === nothing || Pkg.activate(dirname(prev))
+    end
+end
+
+@testitem "_develop_overlay_path_sources! falls back per-source when the batch fails" begin
+    using GPUEnv
+    using Pkg
+    using TOML
+    using Test
+
+    good_dir = mktempdir()
+    write(
+        joinpath(good_dir, "Project.toml"),
+        "name = \"GoodPkg\"\nuuid = \"00000000-0000-0000-0000-000000000075\"\nversion = \"0.1.0\"\n",
+    )
+    mkpath(joinpath(good_dir, "src"))
+    write(joinpath(good_dir, "src", "GoodPkg.jl"), "module GoodPkg\nend\n")
+
+    bad_dir = mktempdir()
+    write(
+        joinpath(bad_dir, "Project.toml"),
+        "name = \"BadUUIDPkg2\"\nuuid = \"not-a-valid-uuid\"\n",
+    )
+
+    overlay_dir = mktempdir()
+    write(
+        joinpath(overlay_dir, "Project.toml"),
+        "name = \"Overlay\"\nuuid = \"00000000-0000-0000-0000-000000000076\"\n",
+    )
+
+    baseline_project = Dict{String, Any}(
+        "deps" => Dict{String, Any}(
+            "GoodPkg" => "00000000-0000-0000-0000-000000000075",
+            "BadUUIDPkg2" => "00000000-0000-0000-0000-000000000077",
+        ),
+        "sources" => Dict{String, Any}(
+            "GoodPkg" => Dict{String, Any}("path" => good_dir),
+            "BadUUIDPkg2" => Dict{String, Any}("path" => bad_dir),
+        ),
+    )
+
+    prev = Base.active_project()
+    try
+        Pkg.activate(overlay_dir)
+        developed = GPUEnv._develop_overlay_path_sources!(baseline_project, devnull)
+        # The batched call fails because of BadUUIDPkg2, so the fallback loop
+        # runs and still develops GoodPkg individually.
+        @test developed == true
+
+        overlay_project = TOML.parsefile(joinpath(overlay_dir, "Project.toml"))
+        @test haskey(get(overlay_project, "deps", Dict()), "GoodPkg")
+        @test !haskey(get(overlay_project, "deps", Dict()), "BadUUIDPkg2")
     finally
         prev === nothing || Pkg.activate(dirname(prev))
     end
