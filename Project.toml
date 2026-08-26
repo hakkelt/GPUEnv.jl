@@ -1,6 +1,6 @@
 name = "GPUEnv"
 uuid = "78a0b619-6146-4252-b244-0f81c54be577"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["Tamás Hakkel <hakkelt@gmail.com>"]
 
 [workspace]
