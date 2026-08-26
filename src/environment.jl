@@ -1,5 +1,76 @@
 const _SYNC_STATE_FILENAME = ".GPUEnv-state.toml"
 
+# --- Session-level activate() cache -----------------------------------------
+# In-process, same-Julia-session short-circuit: if `activate()` is called
+# again with identical effective arguments while GPUEnv's overlay project from
+# the previous successful call is still the active project (i.e. nothing else
+# has since called `Pkg.activate`), skip Pkg entirely and return the cached
+# SyncResult. This sits in front of the file-based `_can_reuse_persisted_env`
+# fingerprint check, which remains the cross-session/cross-process mechanism.
+struct _ActivateCacheKey
+    source_key::String
+    include_jlarrays::Union{Nothing, Bool}
+    backends_to_test::Vector{Symbol}
+    exclude::Vector{Symbol}
+    only_first::Bool
+    persist::Bool
+    environment_path::Union{Nothing, String}
+    warn_if_unignored::Bool
+    manifest_fingerprint::Dict{String, Any}
+end
+
+function Base.:(==)(a::_ActivateCacheKey, b::_ActivateCacheKey)
+    return a.source_key == b.source_key &&
+        a.include_jlarrays == b.include_jlarrays &&
+        a.backends_to_test == b.backends_to_test &&
+        a.exclude == b.exclude &&
+        a.only_first == b.only_first &&
+        a.persist == b.persist &&
+        a.environment_path == b.environment_path &&
+        a.warn_if_unignored == b.warn_if_unignored &&
+        a.manifest_fingerprint == b.manifest_fingerprint
+end
+
+struct _ActivateCacheEntry
+    key::_ActivateCacheKey
+    active_project_path::String
+    result::SyncResult
+end
+
+const _ACTIVATE_SESSION_CACHE = Ref{Union{Nothing, _ActivateCacheEntry}}(nothing)
+
+# Locate the true source root to fingerprint/restore against: the given
+# `path`, or — when `activate()` is still sitting on top of the overlay from
+# a previous call in this session — that call's recorded original source,
+# rather than the overlay itself (which would self-referentially "fingerprint"
+# its own synced copy instead of the real project the user edits).
+function _resolve_source_root_for_cache(
+        path::Union{Nothing, AbstractString}, cached::Union{Nothing, _ActivateCacheEntry},
+    )
+    path !== nothing && return abspath(path)
+    active = Base.active_project()
+    active === nothing && return nothing
+    if cached !== nothing && active == cached.active_project_path
+        return dirname(cached.result.source_project_path)
+    end
+    return dirname(active)
+end
+
+function _source_manifest_fingerprint(source_root::Union{Nothing, String})
+    source_root === nothing && return Dict{String, Any}()
+    source_manifest = _workspace_manifest_path(source_root)
+    source_manifest === nothing && (source_manifest = _preferred_manifest_path(source_root))
+    source_manifest === nothing && (source_manifest = _find_parent_manifest_path(source_root))
+    return _manifest_deps_fingerprint(source_manifest)
+end
+
+"""
+    _reset_activate_session_cache!()
+
+Clear the in-process `activate()` session cache. Exposed for tests only.
+"""
+_reset_activate_session_cache!() = (_ACTIVATE_SESSION_CACHE[] = nothing; nothing)
+
 """
     sync_test_env(; path=nothing, include_jlarrays=nothing,
                   probe=default_backend_probe, checker=default_backend_checker,
@@ -140,6 +211,15 @@ All keyword arguments are forwarded to [`sync_test_env`](@ref), but unlike
 - `dry_run::Bool=false`: if true, return a SyncResult without installing packages or switching environments
 - `io::IO=stderr`: where to print warnings and informational messages
 
+Calling `activate` again in the same Julia session with the same effective
+arguments, while the previously activated overlay project is still active and
+the source project's Manifest is unchanged on disk, is a fast no-op: it
+returns the cached `SyncResult` without touching Pkg at all. If the arguments
+differ, or the source Manifest has changed since the last call (e.g. you
+added or removed a dependency), the overlay is resynchronized from the
+original source project instead of layering another overlay on top of the
+current one. Use [`deactivate`](@ref) to explicitly undo an `activate` call.
+
 ## Example
 
 ```julia
@@ -171,8 +251,39 @@ function activate(
     resolved_jlarrays, native_backends = _validate_and_resolve_include_jlarrays(
         include_jlarrays, requested_backends_to_test, exclude; default_jlarrays = false,
     )
-    if path !== nothing
-        return _sync_env_from_path_impl(
+
+    normalized_environment_path = environment_path === nothing ? nothing : abspath(environment_path)
+
+    # Session-level no-op short-circuit (never applies to dry_run calls).
+    if !dry_run
+        cached = _ACTIVATE_SESSION_CACHE[]
+        source_key = path !== nothing ? abspath(path) : Base.active_project()
+        if source_key !== nothing
+            source_root = _resolve_source_root_for_cache(path, cached)
+            manifest_fingerprint = _source_manifest_fingerprint(source_root)
+            cache_key = _ActivateCacheKey(
+                source_key, include_jlarrays, native_backends, collect(exclude),
+                only_first, persist, normalized_environment_path, warn_if_unignored,
+                manifest_fingerprint,
+            )
+            if cached !== nothing && cached.key == cache_key &&
+                    Base.active_project() == cached.active_project_path
+                return cached.result
+            end
+            # Cache miss (different arguments or a changed source Manifest)
+            # while still sitting on top of the overlay from a previous
+            # activate() call: restore the true source project first so the
+            # fresh sync starts from it instead of nesting another overlay on
+            # top of the current one.
+            if path === nothing && cached !== nothing &&
+                    Base.active_project() == cached.active_project_path
+                Pkg.activate(dirname(cached.result.source_project_path); io = io)
+            end
+        end
+    end
+
+    result = if path !== nothing
+        _sync_env_from_path_impl(
             abspath(path);
             include_jlarrays = resolved_jlarrays,
             probe = probe,
@@ -188,7 +299,7 @@ function activate(
             restore_previous_project = dry_run,
         )
     else
-        return _sync_active_project_env_impl(
+        _sync_active_project_env_impl(
             ;
             include_jlarrays = resolved_jlarrays,
             probe = probe,
@@ -204,6 +315,52 @@ function activate(
             restore_previous_project = dry_run,
         )
     end
+
+    if !dry_run && !result.dry_run
+        source_key = path !== nothing ? abspath(path) : Base.active_project()
+        active_now = Base.active_project()
+        if source_key !== nothing && active_now !== nothing
+            manifest_fingerprint = _source_manifest_fingerprint(dirname(result.source_project_path))
+            cache_key = _ActivateCacheKey(
+                source_key, include_jlarrays, native_backends, collect(exclude),
+                only_first, persist, normalized_environment_path, warn_if_unignored,
+                manifest_fingerprint,
+            )
+            _ACTIVATE_SESSION_CACHE[] = _ActivateCacheEntry(cache_key, active_now, result)
+        end
+    end
+
+    return result
+end
+
+"""
+    deactivate(; io::IO = stderr)
+
+Undo the most recent successful [`activate`](@ref) call in this session:
+restore the Julia project that was active immediately before it, and clear
+the session's `activate` cache.
+
+Throws an `ErrorException` if `activate` has not been called yet in this
+session.
+
+# Arguments
+- `io::IO=stderr`: where to print informational messages
+
+## Example
+
+```julia
+using GPUEnv
+GPUEnv.activate(; persist = true)
+GPUEnv.deactivate()
+```
+"""
+function deactivate(; io::IO = stderr)
+    cached = _ACTIVATE_SESSION_CACHE[]
+    cached === nothing &&
+        error("GPUEnv.deactivate() called, but GPUEnv.activate() has not been called yet in this session.")
+    Pkg.activate(dirname(cached.result.source_project_path); io = io)
+    _ACTIVATE_SESSION_CACHE[] = nothing
+    return nothing
 end
 
 function _sync_active_project_env_impl(
@@ -251,7 +408,7 @@ function _sync_active_project_env_impl(
     # itself, so we also check the local manifest next to the active project file.
     # Returned paths are pushed to LOAD_PATH after overlay activation so those
     # packages remain findable even though they are absent from the overlay deps.
-    stripped_paths = if VERSION < v"1.11"
+    stripped_paths = @static if VERSION < v"1.11"
         paths = _strip_unregistered_path_deps!(sync_project_data, source_manifest)
         let local_manifest = _preferred_manifest_path(source_root)
             if local_manifest != source_manifest
@@ -307,10 +464,12 @@ function _sync_active_project_env_impl(
         if reusable
             installed = copy(requested)
         else
-            _develop_overlay_path_sources!(sync_project_data, io)
+            developed = _develop_overlay_path_sources!(sync_project_data, io)
             installed, functional = _install_and_filter_backends!(requested, checker, only_first, io)
-            _restore_overlay_sources!(project_path, sync_project_data)
-            Pkg.instantiate(; io = io)
+            sources_changed = _restore_overlay_sources!(project_path, sync_project_data)
+            if sources_changed || (!developed && isempty(installed))
+                Pkg.instantiate(; io = io)
+            end
             Pkg.precompile(; io = io)
             sync_state["project_toml"] = read(project_path, String)
             persisted && _write_sync_state!(env_dir, sync_state)
@@ -391,7 +550,7 @@ function _sync_env_from_path_impl(
     )
 
     sync_project_data = _sanitize_environment_project(_merge_backend_entries(source_project, requested))
-    stripped_paths = VERSION < v"1.11" ? _strip_unregistered_path_deps!(sync_project_data, source_manifest) : String[]
+    stripped_paths = @static VERSION < v"1.11" ? _strip_unregistered_path_deps!(sync_project_data, source_manifest) : String[]
 
     env_dir, persisted = _environment_dir(
         root;
@@ -434,10 +593,12 @@ function _sync_env_from_path_impl(
         if reusable
             installed = copy(requested)
         else
-            _develop_overlay_path_sources!(sync_project_data, io)
+            developed = _develop_overlay_path_sources!(sync_project_data, io)
             installed, functional = _install_and_filter_backends!(requested, checker, only_first, io)
-            _restore_overlay_sources!(project_path, sync_project_data)
-            Pkg.instantiate(; io = io)
+            sources_changed = _restore_overlay_sources!(project_path, sync_project_data)
+            if sources_changed || (!developed && isempty(installed))
+                Pkg.instantiate(; io = io)
+            end
             Pkg.precompile(; io = io)
             sync_state["project_toml"] = read(project_path, String)
             persisted && _write_sync_state!(env_dir, sync_state)
@@ -638,22 +799,39 @@ function _develop_overlay_path_sources!(baseline_project::Dict{String, Any}, io:
     baseline_deps = get(baseline_project, "deps", nothing)
     baseline_deps isa Dict || return false
 
-    developed = false
+    eligible = Tuple{String, String}[]
     for (name, value) in baseline_sources
         name in keys(baseline_deps) || continue
         value isa Dict || continue
         path = get(value, "path", nothing)
         path isa AbstractString || continue
         isfile(joinpath(path, "Project.toml")) || continue
+        push!(eligible, (name, path))
+    end
+    isempty(eligible) && return false
+
+    # Fast path: develop all path sources in a single batched call, so a
+    # single Pkg resolve covers all of them instead of one resolve per source.
+    try
+        specs = [Pkg.PackageSpec(path = path) for (_, path) in eligible]
+        Pkg.develop(specs; io = io)
+        return true
+    catch e
+        @debug "GPUEnv: batched Pkg.develop for path sources failed, falling back to per-source develop: $e"
+    end
+
+    # Fallback: develop one at a time so a single failure doesn't block the
+    # others. On Julia 1.10, Pkg.develop calls check_registered even for path-
+    # based specs, which fails for packages not in any registry.  Skip those:
+    # the package is already reachable via the original LOAD_PATH entry from
+    # the test environment, so the package extension will still load
+    # correctly without re-developing it in the overlay.
+    developed = false
+    for (name, path) in eligible
         try
             Pkg.develop(Pkg.PackageSpec(path = path); io = io)
             developed = true
         catch e
-            # On Julia 1.10, Pkg.develop calls check_registered even for path-
-            # based specs, which fails for packages not in any registry.  Skip:
-            # the package is already reachable via the original LOAD_PATH entry
-            # from the test environment, so the package extension will still
-            # load correctly without re-developing it in the overlay.
             @debug "GPUEnv: skipping Pkg.develop for path source '$name' (Julia 1.10 compat): $e"
         end
     end

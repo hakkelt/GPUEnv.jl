@@ -37,4 +37,5 @@ GPUEnv.synchronize_backend
 ```@docs
 GPUEnv.sync_test_env
 GPUEnv.activate
+GPUEnv.deactivate
 ```

@@ -593,3 +593,312 @@ end
         previous_project === nothing || Pkg.activate(dirname(previous_project))
     end
 end
+
+@testitem "activate second call in the same session is a no-op" setup = [SyncTestHelpers] begin
+    using GPUEnv
+    using Pkg
+    using Test
+
+    root = make_fake_package()
+    previous_project = Base.active_project()
+    try
+        GPUEnv._reset_activate_session_cache!()
+
+        result1 = GPUEnv.activate(
+            ;
+            path = root,
+            include_jlarrays = false,
+            probe = _ -> false,
+            checker = _ -> false,
+        )
+        result2 = GPUEnv.activate(
+            ;
+            path = root,
+            include_jlarrays = false,
+            probe = _ -> false,
+            checker = _ -> false,
+        )
+
+        @test result2 === result1
+    finally
+        previous_project === nothing || Pkg.activate(dirname(previous_project))
+        GPUEnv._reset_activate_session_cache!()
+    end
+end
+
+@testitem "activate session cache misses when arguments differ" setup = [SyncTestHelpers] begin
+    using GPUEnv
+    using Pkg
+    using Test
+
+    root = make_fake_package()
+    previous_project = Base.active_project()
+    try
+        GPUEnv._reset_activate_session_cache!()
+
+        result1 = GPUEnv.activate(
+            ;
+            path = root,
+            include_jlarrays = false,
+            probe = _ -> false,
+            checker = _ -> false,
+            only_first = false,
+        )
+        result2 = GPUEnv.activate(
+            ;
+            path = root,
+            include_jlarrays = false,
+            probe = _ -> false,
+            checker = _ -> false,
+            only_first = true,
+        )
+
+        @test result2 !== result1
+    finally
+        previous_project === nothing || Pkg.activate(dirname(previous_project))
+        GPUEnv._reset_activate_session_cache!()
+    end
+end
+
+@testitem "activate session cache misses after a different project is activated in between" setup = [SyncTestHelpers] begin
+    using GPUEnv
+    using Pkg
+    using Test
+
+    root = make_fake_package()
+    other = mktempdir()
+    write(
+        joinpath(other, "Project.toml"),
+        "uuid = \"00000000-0000-0000-0000-000000000126\"\nversion = \"0.1.0\"\n",
+    )
+
+    previous_project = Base.active_project()
+    try
+        GPUEnv._reset_activate_session_cache!()
+
+        result1 = GPUEnv.activate(
+            ;
+            path = root,
+            include_jlarrays = false,
+            probe = _ -> false,
+            checker = _ -> false,
+        )
+
+        Pkg.activate(other)
+
+        result2 = GPUEnv.activate(
+            ;
+            path = root,
+            include_jlarrays = false,
+            probe = _ -> false,
+            checker = _ -> false,
+        )
+
+        @test result2 !== result1
+    finally
+        previous_project === nothing || Pkg.activate(dirname(previous_project))
+        GPUEnv._reset_activate_session_cache!()
+    end
+end
+
+@testitem "activate dry_run never populates or consults the session cache" setup = [SyncTestHelpers] begin
+    using GPUEnv
+    using Pkg
+    using Test
+
+    root = make_fake_package()
+    previous_project = Base.active_project()
+    try
+        GPUEnv._reset_activate_session_cache!()
+
+        dry_result = GPUEnv.activate(
+            ;
+            path = root,
+            dry_run = true,
+            include_jlarrays = false,
+            probe = _ -> false,
+        )
+        @test dry_result.dry_run
+        @test GPUEnv._ACTIVATE_SESSION_CACHE[] === nothing
+
+        real_result = GPUEnv.activate(
+            ;
+            path = root,
+            include_jlarrays = false,
+            probe = _ -> false,
+            checker = _ -> false,
+        )
+        @test !real_result.dry_run
+        @test GPUEnv._ACTIVATE_SESSION_CACHE[] !== nothing
+
+        dry_result2 = GPUEnv.activate(
+            ;
+            path = root,
+            dry_run = true,
+            include_jlarrays = false,
+            probe = _ -> false,
+        )
+        @test dry_result2.dry_run
+        @test dry_result2 !== real_result
+
+        real_result2 = GPUEnv.activate(
+            ;
+            path = root,
+            include_jlarrays = false,
+            probe = _ -> false,
+            checker = _ -> false,
+        )
+        @test real_result2 === real_result
+    finally
+        previous_project === nothing || Pkg.activate(dirname(previous_project))
+        GPUEnv._reset_activate_session_cache!()
+    end
+end
+
+@testitem "deactivate throws when activate has not been called yet" setup = [SyncTestHelpers] begin
+    using GPUEnv
+    using Test
+
+    GPUEnv._reset_activate_session_cache!()
+    @test_throws ErrorException GPUEnv.deactivate()
+end
+
+@testitem "deactivate restores the previous project and clears the session cache" setup = [SyncTestHelpers] begin
+    using GPUEnv
+    using Pkg
+    using Test
+
+    root = make_fake_package()
+    previous_project = Base.active_project()
+    try
+        GPUEnv._reset_activate_session_cache!()
+
+        GPUEnv.activate(
+            ;
+            path = root,
+            include_jlarrays = false,
+            probe = _ -> false,
+            checker = _ -> false,
+        )
+        @test GPUEnv._ACTIVATE_SESSION_CACHE[] !== nothing
+
+        GPUEnv.deactivate()
+
+        @test GPUEnv._ACTIVATE_SESSION_CACHE[] === nothing
+        @test Base.active_project() == joinpath(root, "Project.toml")
+        @test_throws ErrorException GPUEnv.deactivate()
+    finally
+        previous_project === nothing || Pkg.activate(dirname(previous_project))
+        GPUEnv._reset_activate_session_cache!()
+    end
+end
+
+@testitem "activate resyncs from the true source instead of nesting when arguments differ" setup = [SyncTestHelpers] begin
+    using GPUEnv
+    using Pkg
+    using Test
+
+    root = make_fake_package()
+    previous_project = Base.active_project()
+    try
+        GPUEnv._reset_activate_session_cache!()
+
+        Pkg.activate(root)
+        result1 = GPUEnv.activate(
+            ;
+            include_jlarrays = false,
+            probe = _ -> false,
+            checker = _ -> false,
+            only_first = false,
+            persist = true,
+        )
+        result2 = GPUEnv.activate(
+            ;
+            include_jlarrays = false,
+            probe = _ -> false,
+            checker = _ -> false,
+            only_first = true,
+            persist = true,
+        )
+
+        @test result2 !== result1
+        # Both syncs should share the same persisted overlay root and the same
+        # recorded true source — a nesting bug would instead re-derive the
+        # overlay from itself, changing environment_path/source_project_path
+        # between calls.
+        @test result2.environment_path == result1.environment_path
+        @test result2.source_project_path == result1.source_project_path
+        @test result2.source_project_path == joinpath(root, "Project.toml")
+    finally
+        previous_project === nothing || Pkg.activate(dirname(previous_project))
+        GPUEnv._reset_activate_session_cache!()
+    end
+end
+
+@testitem "activate session cache misses when the source Manifest changes on disk" setup = [SyncTestHelpers] begin
+    using GPUEnv
+    using Pkg
+    using Test
+
+    root = make_fake_package()
+    manifest_path = joinpath(root, "Manifest.toml")
+    write(
+        manifest_path,
+        """
+        julia_version = "$VERSION"
+        manifest_format = "2.0"
+
+        [[deps.Foo]]
+        uuid = "00000000-0000-0000-0000-000000000011"
+        version = "0.1.0"
+        """,
+    )
+
+    previous_project = Base.active_project()
+    try
+        GPUEnv._reset_activate_session_cache!()
+
+        result1 = GPUEnv.activate(
+            ;
+            path = root,
+            include_jlarrays = false,
+            probe = _ -> false,
+            checker = _ -> false,
+        )
+
+        # Same effective arguments, unchanged manifest: still a no-op.
+        result2 = GPUEnv.activate(
+            ;
+            path = root,
+            include_jlarrays = false,
+            probe = _ -> false,
+            checker = _ -> false,
+        )
+        @test result2 === result1
+
+        # Simulate a dependency change in the source project's Manifest.
+        write(
+            manifest_path,
+            """
+            julia_version = "$VERSION"
+            manifest_format = "2.0"
+
+            [[deps.Foo]]
+            uuid = "00000000-0000-0000-0000-000000000011"
+            version = "0.2.0"
+            """,
+        )
+
+        result3 = GPUEnv.activate(
+            ;
+            path = root,
+            include_jlarrays = false,
+            probe = _ -> false,
+            checker = _ -> false,
+        )
+        @test result3 !== result2
+    finally
+        previous_project === nothing || Pkg.activate(dirname(previous_project))
+        GPUEnv._reset_activate_session_cache!()
+    end
+end
