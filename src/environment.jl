@@ -56,12 +56,28 @@ function _resolve_source_root_for_cache(
     return dirname(active)
 end
 
+# Pick the manifest to copy into the overlay.
+#
+# On Julia 1.11+ a workspace member's dependencies are resolved in the
+# workspace manifest, so that one is preferred to keep sibling path
+# dependencies consistent.  Julia 1.10 has no workspace support at all: there
+# the workspace root's manifest does not describe this project's environment
+# (it omits the root package itself, and any test-only dependencies), so the
+# project's own manifest must win.  Copying an incomplete manifest is what
+# forces packages to be stripped out of the overlay later on.
+function _select_source_manifest(root::AbstractString)
+    manifest = @static if VERSION >= v"1.11"
+        something(_workspace_manifest_path(root), _preferred_manifest_path(root), Some(nothing))
+    else
+        something(_preferred_manifest_path(root), _workspace_manifest_path(root), Some(nothing))
+    end
+    manifest === nothing && (manifest = _find_parent_manifest_path(root))
+    return manifest
+end
+
 function _source_manifest_fingerprint(source_root::Union{Nothing, String})
     source_root === nothing && return Dict{String, Any}()
-    source_manifest = _workspace_manifest_path(source_root)
-    source_manifest === nothing && (source_manifest = _preferred_manifest_path(source_root))
-    source_manifest === nothing && (source_manifest = _find_parent_manifest_path(source_root))
-    return _manifest_deps_fingerprint(source_manifest)
+    return _manifest_deps_fingerprint(_select_source_manifest(source_root))
 end
 
 """
@@ -386,9 +402,7 @@ function _sync_active_project_env_impl(
     # Prefer the workspace manifest for workspace members so copied manifests stay
     # consistent with sibling path dependencies inherited from the workspace.
     # Fall back to a local manifest or a parent manifest for non-workspace setups.
-    source_manifest = _workspace_manifest_path(source_root)
-    source_manifest === nothing && (source_manifest = _preferred_manifest_path(source_root))
-    source_manifest === nothing && (source_manifest = _find_parent_manifest_path(source_root))
+    source_manifest = _select_source_manifest(source_root)
     source_project = _augment_source_project(source_project, source_root, source_manifest)
     source_project = _localize_running_package_source(source_project)
 
@@ -408,17 +422,10 @@ function _sync_active_project_env_impl(
     # itself, so we also check the local manifest next to the active project file.
     # Returned paths are pushed to LOAD_PATH after overlay activation so those
     # packages remain findable even though they are absent from the overlay deps.
-    stripped_paths = @static if VERSION < v"1.11"
-        paths = _strip_unregistered_path_deps!(sync_project_data, source_manifest)
-        let local_manifest = _preferred_manifest_path(source_root)
-            if local_manifest != source_manifest
-                append!(paths, _strip_unregistered_path_deps!(sync_project_data, local_manifest))
-            end
-        end
-        unique!(paths)
-    else
-        String[]
-    end
+    # Resolvability must be judged against the manifest that is actually copied
+    # into the overlay, so this is evaluated only against `source_manifest`.
+    stripped_paths = @static VERSION < v"1.11" ?
+        _strip_unregistered_path_deps!(sync_project_data, source_manifest) : String[]
 
     env_dir, persisted = _environment_dir(
         source_root;
@@ -467,7 +474,7 @@ function _sync_active_project_env_impl(
             developed = _develop_overlay_path_sources!(sync_project_data, io)
             installed, functional = _install_and_filter_backends!(requested, checker, only_first, io)
             sources_changed = _restore_overlay_sources!(project_path, sync_project_data)
-            if sources_changed || (!developed && isempty(installed))
+            if developed || sources_changed || isempty(installed)
                 Pkg.instantiate(; io = io)
             end
             Pkg.precompile(; io = io)
@@ -533,9 +540,7 @@ function _sync_env_from_path_impl(
     isfile(source_project_path) || error("No Project.toml found at path: $(source_project_path)")
 
     source_project = _rewrite_sources(TOML.parsefile(source_project_path), root)
-    source_manifest = _workspace_manifest_path(root)
-    source_manifest === nothing && (source_manifest = _preferred_manifest_path(root))
-    source_manifest === nothing && (source_manifest = _find_parent_manifest_path(root))
+    source_manifest = _select_source_manifest(root)
     source_project = _augment_source_project(source_project, root, source_manifest)
     source_project = _localize_running_package_source(source_project)
 
@@ -596,7 +601,7 @@ function _sync_env_from_path_impl(
             developed = _develop_overlay_path_sources!(sync_project_data, io)
             installed, functional = _install_and_filter_backends!(requested, checker, only_first, io)
             sources_changed = _restore_overlay_sources!(project_path, sync_project_data)
-            if sources_changed || (!developed && isempty(installed))
+            if developed || sources_changed || isempty(installed)
                 Pkg.instantiate(; io = io)
             end
             Pkg.precompile(; io = io)
@@ -839,41 +844,49 @@ function _develop_overlay_path_sources!(baseline_project::Dict{String, Any}, io:
     return developed
 end
 
-# On Julia 1.10, Pkg.add / targeted_resolve calls check_registered on ALL
-# packages in [deps], and that check fails for any unregistered local package
-# (one with a path entry and no git-tree-sha1 in the manifest).  The workspace
-# manifest is used as source_manifest by _augment_source_project, but the root
-# package never appears in its own workspace manifest, so the test-local
-# manifest must also be checked.  We strip such packages from the overlay
-# project's [deps] (and compat) before writing it to disk, and return their
-# absolute paths so callers can add the source root back to LOAD_PATH to keep
-# those packages findable after the overlay is activated.
+# On Julia 1.10, Pkg.add / targeted_resolve calls check_registered on every
+# package in [deps] that it cannot resolve from the manifest, and that check
+# fails for unregistered local packages.  A path dependency that IS present in
+# the manifest we copy into the overlay is resolved straight from that manifest
+# and never reaches the registry lookup, so it must be kept: stripping it would
+# leave the overlay's [deps] and its manifest inconsistent, and any later Pkg
+# operation would then drop it from the manifest entirely — breaking packages
+# that depend on it.  Julia 1.10 also ignores [sources], so a path dependency
+# that is missing from the manifest genuinely cannot be resolved; those are the
+# ones stripped here, and their absolute paths are returned so callers can put
+# them back on LOAD_PATH to keep them findable.
 function _strip_unregistered_path_deps!(project_data::Dict{String, Any}, manifest_source::Union{Nothing, AbstractString})
     stripped_paths = String[]
-    manifest_source === nothing && return stripped_paths
-    isfile(manifest_source) || return stripped_paths
-
-    manifest_dir = dirname(abspath(manifest_source))
-    manifest_deps_raw = get(TOML.parsefile(manifest_source), "deps", nothing)
-    manifest_deps_raw isa Dict || return stripped_paths
 
     project_deps = get(project_data, "deps", nothing)
     project_deps isa Dict || return stripped_paths
 
-    for (name, records) in manifest_deps_raw
+    sources = get(project_data, "sources", nothing)
+    sources isa Dict || return stripped_paths
+
+    # With no manifest to copy there is nothing to judge resolvability against,
+    # and nothing that a later Pkg operation could drop out of sync either, so
+    # leave the project untouched.
+    manifest_source === nothing && return stripped_paths
+    isfile(manifest_source) || return stripped_paths
+
+    # A manifest that exists but resolves nothing still tells us these deps are
+    # unresolvable, so an absent/empty [deps] table means an empty set here
+    # rather than "don't know".
+    manifest_deps_raw = get(TOML.parsefile(manifest_source), "deps", nothing)
+    resolvable = manifest_deps_raw isa Dict ? Set{String}(String.(keys(manifest_deps_raw))) : Set{String}()
+
+    for (name, value) in collect(sources)
         haskey(project_deps, name) || continue
-        record = records isa Vector ? first(records) : records
-        record isa Dict || continue
-        rel_path = get(record, "path", nothing)
-        rel_path isa AbstractString || continue
-        get(record, "git-tree-sha1", nothing) === nothing || continue
-        abs_path = normpath(joinpath(manifest_dir, rel_path))
+        name in resolvable && continue
+        value isa Dict || continue
+        path = get(value, "path", nothing)
+        path isa AbstractString || continue
         delete!(project_deps, name)
-        sources = get(project_data, "sources", nothing)
-        sources isa Dict && delete!(sources, name)
+        delete!(sources, name)
         compat = get(project_data, "compat", nothing)
         compat isa Dict && delete!(compat, name)
-        push!(stripped_paths, abs_path)
+        push!(stripped_paths, normpath(abspath(path)))
     end
     return stripped_paths
 end

@@ -1057,19 +1057,19 @@ end
             [deps]
             LocalDep = "00000000-0000-0000-0000-000000000072"
 
+            [sources]
+            LocalDep = { path = "LocalDep" }
+
             [compat]
             julia = "1.10"
             """,
         )
+        # LocalDep is deliberately absent from the manifest: Julia 1.10 ignores
+        # [sources], so nothing can resolve it and it is the genuine strip case.
         write(
             joinpath(root, "Manifest.toml"),
             """
             manifest_format = "2.0"
-
-            [[deps.LocalDep]]
-            path = "LocalDep"
-            uuid = "00000000-0000-0000-0000-000000000072"
-            version = "0.1.0"
             """,
         )
 
@@ -1127,17 +1127,17 @@ end
             """
             [deps]
             LocalDep = "00000000-0000-0000-0000-000000000074"
+
+            [sources]
+            LocalDep = { path = "../LocalDep" }
             """,
         )
+        # As above, LocalDep is absent from the manifest that gets copied, so it
+        # cannot be resolved on Julia 1.10 and must be stripped.
         write(
             joinpath(test_dir, "Manifest.toml"),
             """
             manifest_format = "2.0"
-
-            [[deps.LocalDep]]
-            path = "../LocalDep"
-            uuid = "00000000-0000-0000-0000-000000000074"
-            version = "0.1.0"
             """,
         )
 
@@ -1163,10 +1163,55 @@ end
     end
 end
 
-@testitem "_strip_unregistered_path_deps! removes path-only dep and returns its path" begin
+@testitem "_strip_unregistered_path_deps! removes an unresolvable path dep and returns its path" begin
     using GPUEnv
     using Test
 
+    manifest_dir = mktempdir()
+    pkg_dir = mkpath(joinpath(manifest_dir, "LocalPkg"))
+    manifest_path = joinpath(manifest_dir, "Manifest.toml")
+    # LocalPkg is deliberately absent from the manifest: on Julia 1.10 [sources]
+    # is ignored, so nothing can resolve it and it has to be stripped.
+    write(
+        manifest_path,
+        """
+        manifest_format = "2.0"
+
+        [[deps.RegisteredPkg]]
+        uuid = "00000000-0000-0000-0000-000000000051"
+        version = "1.0.0"
+        """,
+    )
+
+    project_data = Dict{String, Any}(
+        "deps" => Dict{String, Any}(
+            "LocalPkg" => "00000000-0000-0000-0000-000000000050",
+            "RegisteredPkg" => "00000000-0000-0000-0000-000000000051",
+        ),
+        "sources" => Dict{String, Any}(
+            "LocalPkg" => Dict{String, Any}("path" => abspath(pkg_dir)),
+        ),
+        "compat" => Dict{String, Any}("LocalPkg" => "0.1", "RegisteredPkg" => "1"),
+    )
+
+    stripped = GPUEnv._strip_unregistered_path_deps!(project_data, manifest_path)
+
+    @test !haskey(project_data["deps"], "LocalPkg")
+    @test haskey(project_data["deps"], "RegisteredPkg")
+    @test !haskey(project_data["compat"], "LocalPkg")
+    @test haskey(project_data["compat"], "RegisteredPkg")
+    @test stripped == [abspath(pkg_dir)]
+end
+
+@testitem "_strip_unregistered_path_deps! keeps a path dep that the manifest resolves" begin
+    using GPUEnv
+    using Test
+
+    # Regression guard: a path dependency present in the copied manifest is
+    # resolved straight from it and never hits check_registered, so it must be
+    # kept.  Stripping it used to leave the overlay's [deps] inconsistent with
+    # its manifest, and a later Pkg operation would drop it from the manifest
+    # too, breaking every package that depends on it.
     manifest_dir = mktempdir()
     pkg_dir = mkpath(joinpath(manifest_dir, "LocalPkg"))
     manifest_path = joinpath(manifest_dir, "Manifest.toml")
@@ -1183,20 +1228,19 @@ end
     )
 
     project_data = Dict{String, Any}(
-        "deps" => Dict{String, Any}(
-            "LocalPkg" => "00000000-0000-0000-0000-000000000050",
-            "RegisteredPkg" => "00000000-0000-0000-0000-000000000051",
+        "deps" => Dict{String, Any}("LocalPkg" => "00000000-0000-0000-0000-000000000050"),
+        "sources" => Dict{String, Any}(
+            "LocalPkg" => Dict{String, Any}("path" => abspath(pkg_dir)),
         ),
-        "compat" => Dict{String, Any}("LocalPkg" => "0.1", "RegisteredPkg" => "1"),
+        "compat" => Dict{String, Any}("LocalPkg" => "0.1"),
     )
 
     stripped = GPUEnv._strip_unregistered_path_deps!(project_data, manifest_path)
 
-    @test !haskey(project_data["deps"], "LocalPkg")
-    @test haskey(project_data["deps"], "RegisteredPkg")
-    @test !haskey(project_data["compat"], "LocalPkg")
-    @test haskey(project_data["compat"], "RegisteredPkg")
-    @test stripped == [abspath(pkg_dir)]
+    @test isempty(stripped)
+    @test haskey(project_data["deps"], "LocalPkg")
+    @test haskey(project_data["sources"], "LocalPkg")
+    @test haskey(project_data["compat"], "LocalPkg")
 end
 
 @testitem "_strip_unregistered_path_deps! also cleans sources entry" begin
@@ -1210,10 +1254,6 @@ end
         manifest_path,
         """
         manifest_format = "2.0"
-
-        [[deps.LocalPkg]]
-        path = "LocalPkg"
-        uuid = "00000000-0000-0000-0000-000000000052"
         """,
     )
 

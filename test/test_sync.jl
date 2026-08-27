@@ -902,3 +902,86 @@ end
         GPUEnv._reset_activate_session_cache!()
     end
 end
+
+@testitem "activate keeps local path deps resolvable in the overlay (#6)" begin
+    using GPUEnv
+    using Pkg
+    using Test
+    using TOML
+
+    # Regression test for the GPUEnv 0.2.1 breakage of AbstractOperators.jl.
+    # `_strip_unregistered_path_deps!` used to drop every path dependency that
+    # the copied manifest already resolved out of the overlay's [deps].  That
+    # left [deps] inconsistent with the overlay manifest, and the next Pkg
+    # operation (developing a path source) re-resolved the overlay and dropped
+    # those packages from the manifest too — so anything depending on them
+    # stopped loading.  The overlay must keep them declared and resolvable.
+
+    dep_dir = mktempdir()
+    write(
+        joinpath(dep_dir, "Project.toml"),
+        """
+        name = "LocalDep"
+        uuid = "00000000-0000-0000-0000-000000000050"
+        version = "0.1.0"
+        """,
+    )
+    mkpath(joinpath(dep_dir, "src"))
+    write(joinpath(dep_dir, "src", "LocalDep.jl"), "module LocalDep\nend\n")
+
+    # A second local package that depends on the first — this is the pair that
+    # broke downstream (DSPOperators depending on AbstractOperators).
+    user_dir = mktempdir()
+    write(
+        joinpath(user_dir, "Project.toml"),
+        """
+        name = "LocalUser"
+        uuid = "00000000-0000-0000-0000-000000000052"
+        version = "0.1.0"
+
+        [deps]
+        LocalDep = "00000000-0000-0000-0000-000000000050"
+        """,
+    )
+    mkpath(joinpath(user_dir, "src"))
+    write(
+        joinpath(user_dir, "src", "LocalUser.jl"),
+        "module LocalUser\nusing LocalDep\nend\n",
+    )
+
+    root = mktempdir()
+    dep_uuid = Base.UUID("00000000-0000-0000-0000-000000000050")
+    user_uuid = Base.UUID("00000000-0000-0000-0000-000000000052")
+
+    previous_project = Base.active_project()
+    try
+        GPUEnv._reset_activate_session_cache!()
+
+        # Build a real manifest for the source project the way a package's test
+        # environment does ([sources] alone is ignored on the LTS release).
+        Pkg.activate(root)
+        Pkg.develop([Pkg.PackageSpec(path = dep_dir), Pkg.PackageSpec(path = user_dir)])
+
+        GPUEnv.activate(
+            ;
+            path = root,
+            include_jlarrays = false,
+            probe = _ -> false,
+            checker = _ -> false,
+        )
+
+        overlay = TOML.parsefile(Base.active_project())
+        overlay_deps = get(overlay, "deps", Dict{String, Any}())
+        @test haskey(overlay_deps, "LocalDep")
+        @test haskey(overlay_deps, "LocalUser")
+
+        deps = Pkg.dependencies()
+        @test haskey(deps, dep_uuid)
+        @test haskey(deps, user_uuid)
+        @test Base.find_package("LocalDep") !== nothing
+        @test Base.find_package("LocalUser") !== nothing
+    finally
+        previous_project === nothing || Pkg.activate(dirname(previous_project))
+        GPUEnv._reset_activate_session_cache!()
+    end
+end
