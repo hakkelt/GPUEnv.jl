@@ -939,6 +939,10 @@ end
     root = mktempdir()
     mkpath(joinpath(root, "src"))
     write(joinpath(root, "src", "HostPkg.jl"), "module HostPkg\nend\n")
+    # Escape backslashes so a Windows mktempdir() path (e.g. C:\Users\...) is
+    # valid inside a TOML basic string, rather than being read as escape
+    # sequences (e.g. \U being parsed as a Unicode escape).
+    dep_dir_toml = replace(dep_dir, "\\" => "\\\\")
     write(
         joinpath(root, "Project.toml"),
         """
@@ -951,7 +955,7 @@ end
         JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 
         [sources]
-        LocalDep = { path = "$(dep_dir)" }
+        LocalDep = { path = "$(dep_dir_toml)" }
 
         [compat]
         julia = "1.10"
