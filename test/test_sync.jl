@@ -902,3 +902,124 @@ end
         GPUEnv._reset_activate_session_cache!()
     end
 end
+
+@testitem "activate resolves every declared dependency after a develop with unchanged sources (#6)" begin
+    using GPUEnv
+    using Pkg
+    using Test
+    using TOML
+
+    # Property test for the precondition described in issue #6: a call to
+    # activate() where _develop_overlay_path_sources! genuinely ran Pkg.develop
+    # on a local path dependency (developed == true) while
+    # _restore_overlay_sources! found the overlay's on-disk Project.toml
+    # already correct (sources_changed == false) — because the overlay's
+    # Project.toml already listed the right [sources] entry before Pkg.develop
+    # ran. After such a call, every dependency declared in the resulting
+    # overlay Project.toml (both the freshly-developed path dependency and
+    # ordinary registry dependencies declared alongside it) must be resolvable,
+    # matching the "every declared dependency must be resolvable" invariant
+    # `Pkg.instantiate()` is responsible for.
+
+    dep_dir = mktempdir()
+    write(
+        joinpath(dep_dir, "Project.toml"),
+        """
+        name = "LocalDep"
+        uuid = "00000000-0000-0000-0000-000000000050"
+        version = "0.1.0"
+
+        [deps]
+        Crayons = "a8cc5b0e-0ffa-5ad4-8c14-923d3ee1735f"
+        """,
+    )
+    mkpath(joinpath(dep_dir, "src"))
+    write(joinpath(dep_dir, "src", "LocalDep.jl"), "module LocalDep\nend\n")
+
+    root = mktempdir()
+    mkpath(joinpath(root, "src"))
+    write(joinpath(root, "src", "HostPkg.jl"), "module HostPkg\nend\n")
+    write(
+        joinpath(root, "Project.toml"),
+        """
+        name = "HostPkg"
+        uuid = "00000000-0000-0000-0000-000000000051"
+        version = "0.1.0"
+
+        [deps]
+        LocalDep = "00000000-0000-0000-0000-000000000050"
+        JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+
+        [sources]
+        LocalDep = { path = "$(dep_dir)" }
+
+        [compat]
+        julia = "1.10"
+        """,
+    )
+
+    env_dir = mktempdir()
+    dep_uuid = Base.UUID("00000000-0000-0000-0000-000000000050")
+    json_uuid = Base.UUID("682c06a0-de6a-54ab-a142-c8b1cf79cde6")
+
+    previous_project = Base.active_project()
+    try
+        GPUEnv._reset_activate_session_cache!()
+
+        # First call: establishes a correctly-resolved persisted overlay at
+        # env_dir, with LocalDep properly developed and instantiated.
+        GPUEnv.activate(
+            ;
+            path = root,
+            include_jlarrays = false,
+            probe = _ -> false,
+            checker = _ -> false,
+            persist = true,
+            environment_path = env_dir,
+        )
+        @test haskey(Pkg.dependencies(), dep_uuid)
+
+        # Now simulate exactly the bug's precondition: the overlay's
+        # Project.toml already correctly lists the [sources] entry (untouched),
+        # but its Manifest no longer resolves LocalDep — as if a previous
+        # session's overlay had gone stale. Deleting the manifest/state files
+        # (without touching Project.toml) forces the next activate() call to
+        # rewrite an identical Project.toml and re-develop LocalDep, without
+        # _restore_overlay_sources! seeing any textual change to restore.
+        for name in readdir(env_dir)
+            occursin(r"^Manifest(?:-v\d+\.\d+)?\.toml$", name) && rm(joinpath(env_dir, name))
+        end
+        rm(joinpath(env_dir, ".GPUEnv-state.toml"); force = true)
+        GPUEnv._reset_activate_session_cache!()
+
+        GPUEnv.activate(
+            ;
+            path = root,
+            include_jlarrays = false,
+            probe = _ -> false,
+            checker = _ -> false,
+            persist = true,
+            environment_path = env_dir,
+        )
+
+        @test Base.find_package("LocalDep") !== nothing
+
+        deps = Pkg.dependencies()
+        @test haskey(deps, dep_uuid)
+        @test deps[dep_uuid].version !== missing
+
+        crayons_uuid = Base.UUID("a8cc5b0e-0ffa-5ad4-8c14-923d3ee1735f")
+        @test haskey(deps, crayons_uuid)
+        @test deps[crayons_uuid].version !== missing
+
+        # JSON is a plain registry dependency declared alongside LocalDep but
+        # never passed to Pkg.develop; only a real Pkg.instantiate() resolves
+        # it into the Manifest.
+        @test Base.find_package("JSON") !== nothing
+        @test haskey(deps, json_uuid)
+        @test deps[json_uuid].version !== missing
+    finally
+        previous_project === nothing || Pkg.activate(dirname(previous_project))
+        GPUEnv._reset_activate_session_cache!()
+    end
+end

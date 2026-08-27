@@ -467,7 +467,7 @@ function _sync_active_project_env_impl(
             developed = _develop_overlay_path_sources!(sync_project_data, io)
             installed, functional = _install_and_filter_backends!(requested, checker, only_first, io)
             sources_changed = _restore_overlay_sources!(project_path, sync_project_data)
-            if sources_changed || (!developed && isempty(installed))
+            if developed || sources_changed || isempty(installed)
                 Pkg.instantiate(; io = io)
             end
             Pkg.precompile(; io = io)
@@ -596,7 +596,7 @@ function _sync_env_from_path_impl(
             developed = _develop_overlay_path_sources!(sync_project_data, io)
             installed, functional = _install_and_filter_backends!(requested, checker, only_first, io)
             sources_changed = _restore_overlay_sources!(project_path, sync_project_data)
-            if sources_changed || (!developed && isempty(installed))
+            if developed || sources_changed || isempty(installed)
                 Pkg.instantiate(; io = io)
             end
             Pkg.precompile(; io = io)
