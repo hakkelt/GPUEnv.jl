@@ -144,6 +144,26 @@ function _merge_backend_entries(base_project::Dict{String, Any}, backends::Abstr
     return project
 end
 
+# `project_data` without the [deps] and [compat] entries of the `requested`
+# backends that `source_project` does not depend on itself.
+function _without_added_backends(
+        project_data::Dict{String, Any},
+        source_project::Dict{String, Any},
+        requested::AbstractVector{Symbol},
+    )
+    source_deps = get(source_project, "deps", Dict{String, Any}())
+    project = deepcopy(project_data)
+    for backend in requested
+        spec = get(BACKEND_SPECS, backend, nothing)
+        (spec === nothing || haskey(source_deps, spec.package)) && continue
+        for section in ("deps", "compat")
+            table = get(project, section, nothing)
+            table isa Dict && delete!(table, spec.package)
+        end
+    end
+    return project
+end
+
 function _merge_project_tables(
         base_project::Dict{String, Any},
         extra_project::Dict{String, Any};

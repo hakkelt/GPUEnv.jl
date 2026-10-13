@@ -3,7 +3,8 @@
 ## GPUSelect.jl
 
 The driver-library backend detection (`BACKEND_DRIVER_LIBRARIES`,
-`_driver_library_probe`), the Apple silicon check for Metal and `report_backends`
+`_driver_library_probe`; GPUEnv looks for the library files instead of loading
+them), the Apple silicon check for Metal and `report_backends`
 in `src/backends.jl` are adapted from `find_gpu_pkgid` and `test_backends` of
 [GPUSelect.jl](https://github.com/SimonDanisch/GPUSelect.jl), which is
 distributed under the following license:

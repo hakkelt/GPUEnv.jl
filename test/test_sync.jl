@@ -255,9 +255,10 @@ end
 
     root = make_fake_package()
     env_dir = mktempdir()
-    sync(checker) = GPUEnv.sync_test_env(
+    sync(checker; retry_failed = false) = GPUEnv.sync_test_env(
         ;
         path = root,
+        retry_failed,
         persist = true,
         environment_path = env_dir,
         include_jlarrays = true,
@@ -273,17 +274,25 @@ end
     @test isfile(state_path)
     project_path = joinpath(env_dir, "Project.toml")
     @test !haskey(get(TOML.parsefile(project_path), "deps", Dict()), "JLArrays")
+    @test haskey(TOML.parsefile(state_path)["failed_backends"], "JLArrays")
 
-    # The overlay is reused, and only the missing backend is added back, together
-    # with the compat bound a fresh overlay would carry.
-    second_result = sync(_ -> true)
+    # Nothing changed since the failure, so the reused overlay does not retry it.
+    checked = Symbol[]
+    @test sync(b -> (push!(checked, b); true)).installed_backends == Symbol[]
+    @test isempty(checked)
+
+    # With retry_failed, only the missing backend is added back, together with
+    # the compat bound a fresh overlay would carry.
+    second_result = sync(_ -> true; retry_failed = true)
     @test second_result.installed_backends == [:JLArrays]
     @test second_result.functional_backends == [:JLArrays]
     project = TOML.parsefile(project_path)
     @test haskey(project["deps"], "JLArrays")
     @test haskey(get(project, "compat", Dict()), "JLArrays")
     # The state follows Pkg's rewrite of Project.toml, so the next run reuses it as is.
-    @test TOML.parsefile(state_path)["project_toml"] == read(project_path, String)
+    state = TOML.parsefile(state_path)
+    @test state["project_toml"] == read(project_path, String)
+    @test isempty(state["failed_backends"])
 end
 
 @testitem "_sync_env_from_path_impl reuses persisted env" setup = [SyncTestHelpers] begin

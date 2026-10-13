@@ -1,6 +1,5 @@
 module GPUEnv
 
-using Libdl
 using Pkg
 using TOML
 
@@ -24,6 +23,7 @@ export BackendSpec,
     resolve_backends,
     sync_test_env,
     supported_backends,
+    supports_float64,
     synchronize_backend
 
 include("backends.jl")

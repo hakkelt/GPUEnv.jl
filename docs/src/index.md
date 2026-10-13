@@ -35,15 +35,26 @@ explicit directory that contains a `Project.toml`.
 Backend prediction prefers direct host hints first: Linux device nodes and PCI
 vendor IDs, and Apple silicon on macOS (Metal.jl does not support Intel Macs).
 When those are inconclusive, and always on Windows, it looks for the vendor
-driver library through the dynamic loader (`libcuda`/`nvcuda`, `libamdhip64`,
-`libze_loader`, `libOpenCL`), so no vendor command-line tools are needed.
+driver library file on the loader search path (`libcuda`/`nvcuda`,
+`libamdhip64`, `libze_loader`) without loading it, so no vendor command-line
+tools are needed. OpenCL is predicted from hardware hints only, because its ICD
+loader is installed on many machines without a GPU.
+
+Not every device supports `Float64`: Metal never does, and some Intel GPUs
+(oneAPI) and OpenCL devices do not either. `supports_float64(backend)` asks the
+device, and `gpu_backends(; require_float64 = true)` keeps only the backends
+that do.
 
 Backends with an AbstractFFTs implementation (`gpu_backends(; supports_fftw = true)`)
-are CUDA, AMDGPU, Metal (Metal.jl 1.10 or newer; `Float32`/`Float16` only), and
-JLArrays on Julia 1.11 or newer.
+are CUDA, AMDGPU, Metal (Metal.jl 1.10 or newer) and JLArrays on Julia 1.11 or
+newer. `require_float64` defaults to `supports_fftw`, so this returns the
+backends that transform `Float64` data like FFTW does; Metal, whose FFTs take
+`Float32`/`Float16` data only, is added with
+`gpu_backends(; supports_fftw = true, require_float64 = false)`.
 
 Run [`report_backends`](@ref) to see the hardware hints, driver libraries, installed
-packages, functional checks and FFT support for every backend on the current host.
+packages, functional checks, `Float64` support and FFT support for every backend
+on the current host.
 
 ## Test overlays
 
@@ -166,7 +177,8 @@ Query and use the available backends after `activate` has run:
 
 ```julia
 backends = gpu_backends()                               # all functional native backends
-backends_fftw = gpu_backends(; supports_fftw = true)   # only AbstractFFTs-capable
+backends_fftw = gpu_backends(; supports_fftw = true)   # only AbstractFFTs-capable, with Float64
+backends_f64 = gpu_backends(; require_float64 = true)  # only devices that support Float64
 backends_jl = gpu_backends(; include_jlarrays = true)  # also include JLArrays mock
 
 for backend in backends

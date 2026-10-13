@@ -34,15 +34,26 @@ Pkg for the actual dependency resolution and installation work.
 Backend prediction prefers direct host hints first: Linux device nodes and PCI
 vendor IDs, and Apple silicon on macOS (Metal.jl does not support Intel Macs).
 When those are inconclusive, and always on Windows, it looks for the vendor
-driver library through the dynamic loader (`libcuda`/`nvcuda`, `libamdhip64`,
-`libze_loader`, `libOpenCL`), so no vendor command-line tools are needed.
+driver library file on the loader search path (`libcuda`/`nvcuda`,
+`libamdhip64`, `libze_loader`) without loading it, so no vendor command-line
+tools are needed. OpenCL is predicted from hardware hints only, because its ICD
+loader is installed on many machines without a GPU.
+
+Not every device supports `Float64`: Metal never does, and some Intel GPUs
+(oneAPI) and OpenCL devices do not either. `supports_float64(backend)` asks the
+device, and `gpu_backends(; require_float64 = true)` keeps only the backends
+that do.
 
 Backends with an AbstractFFTs implementation (`gpu_backends(; supports_fftw = true)`)
-are CUDA, AMDGPU, Metal (Metal.jl 1.10 or newer; `Float32`/`Float16` only), and
-JLArrays on Julia 1.11 or newer.
+are CUDA, AMDGPU, Metal (Metal.jl 1.10 or newer) and JLArrays on Julia 1.11 or
+newer. `require_float64` defaults to `supports_fftw`, so this returns the
+backends that transform `Float64` data like FFTW does; Metal, whose FFTs take
+`Float32`/`Float16` data only, is added with
+`gpu_backends(; supports_fftw = true, require_float64 = false)`.
 
 Run `report_backends()` to see the hardware hints, driver libraries, installed
-packages, functional checks and FFT support for every backend on the current host.
+packages, functional checks, `Float64` support and FFT support for every backend
+on the current host.
 
 ## Use case 1: test overlays
 
@@ -191,6 +202,7 @@ GPUSelect.jl's `find_gpu_pkgid` and `test_backends` (MIT License, Copyright (c)
 - `gpu_backends(...)` returns the functional backends available in the current session.
 - `predict_backends(...)` returns the backends that look worth trying on this host before installation.
 - `report_backends()` prints what GPUEnv detects on this host and in the active environment.
+- `supports_float64(backend)` tells whether the backend's device supports `Float64`.
 - `gpu_zeros`, `gpu_ones`, `gpu_randn`, and `gpu_wrapper` provide small backend-agnostic helpers.
 
 ## AI Usage Disclaimer

@@ -89,7 +89,7 @@ end
     @test GPUEnv._driver_library_probe(:CUDA; os = :linux, find_library)
     @test !GPUEnv._driver_library_probe(:AMDGPU; os = :linux, find_library)
     @test !GPUEnv._driver_library_probe(:oneAPI; os = :linux, find_library)
-    @test GPUEnv._driver_library_probe(:oneAPI; os = :windows, find_library)
+    @test !GPUEnv._driver_library_probe(:oneAPI; os = :windows, find_library)  # oneAPI.jl is Linux-only
     @test GPUEnv._driver_library_probe(:CUDA; os = :windows, find_library)
     @test "nvcuda" in queried[end]
 
@@ -101,6 +101,109 @@ end
     @test !GPUEnv._driver_library_probe(:CUDA; os = :linux, find_library = _ -> error("broken loader"))
 end
 
+@testitem "_find_library_file looks for files without loading them" begin
+    using GPUEnv
+    using Test
+
+    dir = mktempdir()
+    touch(joinpath(dir, "libcuda.so.1"))
+    touch(joinpath(dir, "nvcuda.dll"))
+    no_cache = () -> error("the linker cache is not needed")
+
+    linux_env = Dict("LD_LIBRARY_PATH" => "/nonexistent:" * dir)
+    @test GPUEnv._find_library_file(["libcuda", "libcuda.so.1"]; os = :linux, env = linux_env, system_libraries = no_cache) ==
+        joinpath(dir, "libcuda.so.1")
+    @test GPUEnv._find_library_file(["nvcuda"]; os = :windows, env = Dict("PATH" => dir), system_libraries = no_cache) ==
+        joinpath(dir, "nvcuda.dll")
+
+    # Falls back to the dynamic linker cache on Linux
+    cache = () -> Dict("libamdhip64.so" => "/opt/rocm/lib/libamdhip64.so")
+    @test GPUEnv._find_library_file(["libamdhip64"]; os = :linux, env = Dict{String, String}(), system_libraries = cache) ==
+        "/opt/rocm/lib/libamdhip64.so"
+    @test GPUEnv._find_library_file(["libze_loader"]; os = :linux, env = Dict{String, String}(), system_libraries = cache) == ""
+    @test GPUEnv._system_libraries() isa Dict{String, String}
+end
+
+@testitem "default_backend_probe does not predict OpenCL from its loader alone" begin
+    using GPUEnv
+    using Test
+
+    no_hints = Dict(backend => false for backend in GPUEnv.NATIVE_BACKENDS)
+    @test !GPUEnv.default_backend_probe(:OpenCL; hardware = no_hints, fallback = _ -> true)
+    @test GPUEnv.default_backend_probe(:CUDA; hardware = no_hints, fallback = _ -> true)
+    @test GPUEnv.default_backend_probe(:OpenCL; hardware = merge(no_hints, Dict(:OpenCL => true)), fallback = _ -> false)
+end
+
+@testitem "failed backends are retried only when something changed" begin
+    using GPUEnv
+    using Test
+
+    @test GPUEnv._latest_registered_version(:JLArrays) isa VersionNumber
+    @test GPUEnv._latest_registered_version(:NoSuchBackend) === nothing
+
+    failures = Dict{String, Any}()
+    @test GPUEnv._retry_due(:JLArrays, failures)  # never failed
+    GPUEnv._record_failures!(failures, [:JLArrays, :CUDA], [:CUDA])
+    @test collect(keys(failures)) == ["JLArrays"]
+    @test failures["JLArrays"]["julia"] == string(VERSION)
+    @test !GPUEnv._retry_due(:JLArrays, failures)  # nothing changed since
+
+    failures["JLArrays"]["latest_release"] = "0.0.1"  # a newer release appeared since
+    @test GPUEnv._retry_due(:JLArrays, failures)
+    failures["JLArrays"] = GPUEnv._failure_record(:JLArrays)
+    failures["JLArrays"]["julia"] = "1.0.0"  # the Julia version changed
+    @test GPUEnv._retry_due(:JLArrays, failures)
+
+    GPUEnv._record_failures!(failures, [:JLArrays], [:JLArrays])  # works now
+    @test isempty(failures)
+end
+
+@testitem "_add_backends! takes the entries out again when the add fails" begin
+    using GPUEnv
+    using Pkg
+    using TOML
+    using Test
+
+    env_dir = mktempdir()
+    project_path = joinpath(env_dir, "Project.toml")
+    write(project_path, "[deps]\nTOML = \"fa267f1f-6049-4f14-aa54-33bafae1ed76\"\n")
+    original = read(project_path, String)
+    spec = GPUEnv.BACKEND_SPECS[:CUDA]
+    entries = Dict{String, Any}("compat" => Dict{String, Any}("CUDA" => "5"))
+
+    previous_project = Base.active_project()
+    try
+        Pkg.activate(env_dir; io = devnull)
+        seen = Ref{Any}(nothing)
+        @test !GPUEnv._add_backends!(() -> (seen[] = TOML.parsefile(project_path); false), [spec], entries)
+        @test seen[]["deps"]["CUDA"] == spec.uuid
+        @test seen[]["compat"]["CUDA"] == "5"
+        @test read(project_path, String) == original
+
+        @test GPUEnv._add_backends!(() -> true, [spec], entries)
+        @test TOML.parsefile(project_path)["compat"]["CUDA"] == "5"
+    finally
+        previous_project === nothing || Pkg.activate(dirname(previous_project); io = devnull)
+    end
+end
+
+@testitem "_without_added_backends keeps the backends the source depends on" begin
+    using GPUEnv
+    using Test
+
+    cuda = GPUEnv.BACKEND_SPECS[:CUDA]
+    metal = GPUEnv.BACKEND_SPECS[:Metal]
+    source = Dict{String, Any}("deps" => Dict{String, Any}("CUDA" => cuda.uuid))
+    data = Dict{String, Any}(
+        "deps" => Dict{String, Any}("CUDA" => cuda.uuid, "Metal" => metal.uuid, "Foo" => "x"),
+        "compat" => Dict{String, Any}("CUDA" => "5", "Metal" => "1", "julia" => "1.10"),
+    )
+    stripped = GPUEnv._without_added_backends(data, source, [:CUDA, :Metal, :NoSuchBackend])
+    @test stripped["deps"] == Dict("CUDA" => cuda.uuid, "Foo" => "x")
+    @test stripped["compat"] == Dict("CUDA" => "5", "julia" => "1.10")
+    @test haskey(data["deps"], "Metal")  # the input is not modified
+end
+
 @testitem "default_backend_probe uses direct detection before fallback" begin
     using GPUEnv
     using Test
@@ -109,7 +212,7 @@ end
     hardware[:CUDA] = true
 
     @test GPUEnv.default_backend_probe(:CUDA; hardware, fallback = _ -> error("fallback should not run"))
-    @test GPUEnv.default_backend_probe(:OpenCL; hardware, fallback = backend -> backend === :OpenCL)
+    @test GPUEnv.default_backend_probe(:AMDGPU; hardware, fallback = backend -> backend === :AMDGPU)
 end
 
 @testitem "_backend_functional handles OpenCL platform queries" begin
@@ -479,6 +582,7 @@ end
 
 @testitem "_install_backends! warns for unknown backends and falls back to individual installs" begin
     using GPUEnv
+    using Pkg
     using Test
 
     mutable struct FallbackInstallIO <: IO
@@ -500,11 +604,22 @@ end
     end
 
     io = FallbackInstallIO()
-    @test_logs (:warn, r"Some of the requested backends do not have known packages to install") (
-        :warn,
-        r"Failed to install backend package",
-    ) begin
-        @test GPUEnv._install_backends!([:JLArrays, :NoSuchBackend, :CUDA], io) == [:JLArrays]
+    env_dir = mktempdir()
+    write(joinpath(env_dir, "Project.toml"), "")
+    previous_project = Base.active_project()
+    try
+        Pkg.activate(env_dir; io = devnull)
+        @test_logs (:warn, r"Some of the requested backends do not have known packages to install") (
+            :warn,
+            r"Failed to install backend package",
+        ) begin
+            @test GPUEnv._install_backends!([:JLArrays, :NoSuchBackend, :CUDA], io) == [:JLArrays]
+        end
+        # The failed CUDA add was taken out again; the mocked JLArrays add stays
+        deps = get(GPUEnv.TOML.parsefile(joinpath(env_dir, "Project.toml")), "deps", Dict())
+        @test collect(keys(deps)) == ["JLArrays"]
+    finally
+        previous_project === nothing || Pkg.activate(dirname(previous_project); io = devnull)
     end
 
     @test io.batch_attempts == [["JLArrays", "CUDA"]]

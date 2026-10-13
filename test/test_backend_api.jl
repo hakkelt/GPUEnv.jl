@@ -123,6 +123,12 @@ end
     @test GPUEnv._supports_fftw(:CUDA, MetalStub)
     @test GPUEnv._supports_fftw(:Metal, MetalStub)  # no version known: trust the backend
     @test GPUEnv.FFTW_NATIVE_BACKENDS[:Metal] == v"1.10"
+    @test !GPUEnv._supports_fftw(:Metal, v"1.9.1")
+    @test GPUEnv._supports_fftw(:Metal, v"1.10.0")
+
+    # JLArrays supports Float64, so require_float64 keeps it
+    @test any(is_jlarray_backend, gpu_backends(; supports_fftw = false, require_float64 = true)) ==
+        any(is_jlarray_backend, gpu_backends(; supports_fftw = false))
 
     # Without supports_fftw, JLArrays is always included (when JLArrays is loadable)
     all_backends = gpu_backends(; supports_fftw = false)
@@ -436,10 +442,12 @@ end
     @test !ok  # AMDGPU is installed but not functional
     @test checked == [:JLArrays, :CUDA, :AMDGPU]  # Metal is not installed, so not loaded
     @test contains(out, "GPUEnv backend report")
-    @test occursin(r"CUDA\s+yes\s+no\s+yes\s+yes", out)
-    @test occursin(r"AMDGPU\s+no\s+yes\s+yes\s+no", out)
-    @test occursin(r"Metal\s+no\s+no\s+no\s+-\s+-", out)
-    @test occursin(Regex("JLArrays\\s+-\\s+-\\s+yes\\s+yes\\s+" * (VERSION >= v"1.11" ? "yes" : "no")), out)
+    # CUDA is not loaded here, so its Float64 support is unknown; its FFT support
+    # follows from the installed version, unknown as well, which is trusted.
+    @test occursin(r"CUDA\s+yes\s+no\s+yes\s+yes\s+-\s+yes", out)
+    @test occursin(r"AMDGPU\s+no\s+yes\s+yes\s+no\s+-\s+yes", out)
+    @test occursin(r"Metal\s+no\s+no\s+no\s+-\s+-\s+-", out)
+    @test occursin(Regex("JLArrays\\s+-\\s+-\\s+yes\\s+yes\\s+yes\\s+" * (VERSION >= v"1.11" ? "yes" : "no")), out)
     @test !any(endswith(' '), split(out, '\n'))
 
     @test report_backends(
@@ -450,4 +458,38 @@ end
         installed = _ -> false,
         checker = _ -> error("must not be called"),
     )
+end
+
+@testitem "supports_float64 asks the device where it varies" begin
+    using GPUEnv
+    using JLArrays
+    using Test
+
+    @test supports_float64(GPUEnv.GpuBackend(:JLArray, JLArrays, JLArrays.JLArray))
+    @test GPUEnv._supports_float64(:CUDA, Module(:CUDA))
+    @test GPUEnv._supports_float64(:AMDGPU, Module(:AMDGPU))
+    @test !GPUEnv._supports_float64(:Metal, Module(:Metal))
+
+    # A module without the query API counts as unsupported rather than throwing
+    @test !GPUEnv._supports_float64(:oneAPI, Module(:oneAPI))
+    @test !GPUEnv._supports_float64(:OpenCL, Module(:OpenCL))
+
+    function stub(name; definitions...)
+        m = Module(name)
+        for (key, value) in definitions
+            Core.eval(m, :(const $key = $value))
+        end
+        return m
+    end
+    opencl(extensions) = stub(:OpenCL; cl = stub(:cl; device = () -> (; extensions)))
+    @test GPUEnv._supports_float64(:OpenCL, opencl(["cl_khr_fp16", "cl_khr_fp64"]))
+    @test !GPUEnv._supports_float64(:OpenCL, opencl(["cl_khr_fp16"]))
+
+    oneapi(flags) = stub(
+        :oneAPI;
+        oneL0 = stub(:oneL0; ZE_DEVICE_MODULE_FLAG_FP64 = UInt32(4), module_properties = _ -> (; fp64flags = flags)),
+        device = () -> :device,
+    )
+    @test GPUEnv._supports_float64(:oneAPI, oneapi(UInt32(0b111)))
+    @test !GPUEnv._supports_float64(:oneAPI, oneapi(UInt32(0)))
 end

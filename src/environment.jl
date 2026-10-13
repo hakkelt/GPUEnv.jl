@@ -93,7 +93,7 @@ _reset_activate_session_cache!() = (_ACTIVATE_SESSION_CACHE[] = nothing; nothing
                   backends_to_test=supported_backends(),
                   exclude=Symbol[], only_first=false,
                   persist=false, environment_path=nothing,
-                  warn_if_unignored=true, dry_run=false, io=stderr)
+                  warn_if_unignored=true, dry_run=false, retry_failed=false, io=stderr)
 
 Create or update a GPU overlay environment for the currently active project or
 for a directory rooted at `path`.
@@ -122,13 +122,17 @@ packages.
 - `exclude::AbstractVector{Symbol}=Symbol[]`: backends to skip even when predicted as available
 - `only_first::Bool=false`: if true, stop after the first functional backend is installed
 - `persist::Bool=false`: whether to cache the environment in `gpu_env/` under the overlay root.
-  A reused environment re-checks predicted backends it lacks, so a backend that failed its
-  functional check once (and was removed with a warning) is retried on the next call.
+  A reused environment retries a predicted backend that failed to install or failed its
+  functional check (and was removed with a warning) once something that could fix it has
+  changed: the Julia version, or a newer registered release of the backend package. A changed
+  source project rebuilds the environment, which retries every backend.
 - `environment_path::Union{Nothing, AbstractString}=nothing`: exact path of the folder to use for the
   GPU overlay environment; when provided the folder is used directly (no subdirectory is appended).
   Set `persist=true` alongside `environment_path` to enable environment reuse.
 - `warn_if_unignored::Bool=true`: whether to warn if a persisted env is not in .gitignore
 - `dry_run::Bool=false`: if true, return the plan without installing packages
+- `retry_failed::Bool=false`: if true, a reused environment retries every predicted backend it
+  lacks, even when nothing changed since it failed
 - `io::IO=stderr`: where to print warnings and informational messages
 """
 function sync_test_env(
@@ -144,6 +148,7 @@ function sync_test_env(
         environment_path::Union{Nothing, AbstractString} = nothing,
         warn_if_unignored::Bool = true,
         dry_run::Bool = false,
+        retry_failed::Bool = false,
         io::IO = stderr,
     )
     requested_backends_to_test = collect(backends_to_test)
@@ -167,6 +172,7 @@ function sync_test_env(
             environment_path = environment_path,
             warn_if_unignored = warn_if_unignored,
             dry_run = dry_run,
+            retry_failed = retry_failed,
             io = io,
             restore_previous_project = true,
         )
@@ -183,6 +189,7 @@ function sync_test_env(
             environment_path = environment_path,
             warn_if_unignored = warn_if_unignored,
             dry_run = dry_run,
+            retry_failed = retry_failed,
             io = io,
             restore_previous_project = true,
         )
@@ -195,7 +202,7 @@ end
              backends_to_test=supported_backends(),
              exclude=Symbol[], only_first=false,
              persist=false, environment_path=nothing,
-             warn_if_unignored=true, dry_run=false, io=stderr)
+             warn_if_unignored=true, dry_run=false, retry_failed=false, io=stderr)
 
 Create, synchronize, and activate a GPU overlay environment.
 
@@ -222,13 +229,17 @@ All keyword arguments are forwarded to [`sync_test_env`](@ref), but unlike
 - `exclude::AbstractVector{Symbol}=Symbol[]`: backends to skip even when predicted as available
 - `only_first::Bool=false`: if true, stop after the first functional backend is installed
 - `persist::Bool=false`: whether to cache the environment in `gpu_env/` under the overlay root.
-  A reused environment re-checks predicted backends it lacks, so a backend that failed its
-  functional check once (and was removed with a warning) is retried on the next call.
+  A reused environment retries a predicted backend that failed to install or failed its
+  functional check (and was removed with a warning) once something that could fix it has
+  changed: the Julia version, or a newer registered release of the backend package. A changed
+  source project rebuilds the environment, which retries every backend.
 - `environment_path::Union{Nothing, AbstractString}=nothing`: exact path of the folder to use for the
   GPU overlay environment; when provided the folder is used directly (no subdirectory is appended).
   Set `persist=true` alongside `environment_path` to enable environment reuse.
 - `warn_if_unignored::Bool=true`: whether to warn if a persisted env is not in .gitignore
 - `dry_run::Bool=false`: if true, return a SyncResult without installing packages or switching environments
+- `retry_failed::Bool=false`: if true, a reused environment retries every predicted backend it
+  lacks, even when nothing changed since it failed
 - `io::IO=stderr`: where to print warnings and informational messages
 
 Calling `activate` again in the same Julia session with the same effective
@@ -261,6 +272,7 @@ function activate(
         environment_path::Union{Nothing, AbstractString} = nothing,
         warn_if_unignored::Bool = true,
         dry_run::Bool = false,
+        retry_failed::Bool = false,
         io::IO = stderr,
     )
     requested_backends_to_test = collect(backends_to_test)
@@ -274,8 +286,8 @@ function activate(
 
     normalized_environment_path = environment_path === nothing ? nothing : abspath(environment_path)
 
-    # Session-level no-op short-circuit (never applies to dry_run calls).
-    if !dry_run
+    # Session-level no-op short-circuit (never applies to dry_run or retry_failed calls).
+    if !dry_run && !retry_failed
         cached = _ACTIVATE_SESSION_CACHE[]
         source_key = path !== nothing ? abspath(path) : Base.active_project()
         if source_key !== nothing
@@ -315,6 +327,7 @@ function activate(
             environment_path = environment_path,
             warn_if_unignored = warn_if_unignored,
             dry_run = dry_run,
+            retry_failed = retry_failed,
             io = io,
             restore_previous_project = dry_run,
         )
@@ -331,6 +344,7 @@ function activate(
             environment_path = environment_path,
             warn_if_unignored = warn_if_unignored,
             dry_run = dry_run,
+            retry_failed = retry_failed,
             io = io,
             restore_previous_project = dry_run,
         )
@@ -395,6 +409,7 @@ function _sync_active_project_env_impl(
         environment_path::Union{Nothing, AbstractString},
         warn_if_unignored::Bool,
         dry_run::Bool,
+        retry_failed::Bool = false,
         io::IO,
         restore_previous_project::Bool,
     )
@@ -436,6 +451,7 @@ function _sync_active_project_env_impl(
         active_project,
         :active_project;
         sync_project_data = sync_project_data,
+        source_project = source_project,
         source_manifest = source_manifest,
         requested = requested,
         stripped_paths = stripped_paths,
@@ -446,6 +462,7 @@ function _sync_active_project_env_impl(
         environment_path = environment_path,
         warn_if_unignored = warn_if_unignored,
         dry_run = dry_run,
+        retry_failed = retry_failed,
         io = io,
         restore_previous_project = restore_previous_project,
     )
@@ -463,6 +480,7 @@ function _sync_env_from_path_impl(
         environment_path::Union{Nothing, AbstractString},
         warn_if_unignored::Bool,
         dry_run::Bool,
+        retry_failed::Bool = false,
         restore_previous_project::Bool,
         io::IO = stderr,
     )
@@ -492,6 +510,7 @@ function _sync_env_from_path_impl(
         source_project_path,
         :path_project;
         sync_project_data = sync_project_data,
+        source_project = source_project,
         source_manifest = source_manifest,
         requested = requested,
         stripped_paths = stripped_paths,
@@ -502,6 +521,7 @@ function _sync_env_from_path_impl(
         environment_path = environment_path,
         warn_if_unignored = warn_if_unignored,
         dry_run = dry_run,
+        retry_failed = retry_failed,
         io = io,
         restore_previous_project = restore_previous_project,
     )
@@ -516,6 +536,7 @@ function _sync_overlay!(
         source_path::AbstractString,
         source_kind::Symbol;
         sync_project_data::Dict{String, Any},
+        source_project::Dict{String, Any},
         source_manifest::Union{Nothing, String},
         requested::AbstractVector{Symbol},
         stripped_paths::AbstractVector{<:AbstractString},
@@ -526,13 +547,18 @@ function _sync_overlay!(
         environment_path::Union{Nothing, AbstractString},
         warn_if_unignored::Bool,
         dry_run::Bool,
+        retry_failed::Bool,
         io::IO,
         restore_previous_project::Bool,
     )
     env_dir, persisted = _environment_dir(source_root; persist = persist, environment_path = environment_path)
     sync_state = _sync_state_data(sync_project_data, source_manifest, requested, only_first)
     reusable = _can_reuse_persisted_env(sync_state, env_dir; persisted = persisted)
-    project_path = reusable ? joinpath(env_dir, "Project.toml") : _write_environment!(sync_project_data, source_manifest, env_dir)
+    # The backends are added by Pkg one batch at a time (see `_add_backends!`), so a
+    # fresh overlay starts without those the source project does not depend on. A
+    # dry run installs nothing, so its overlay lists them all as the plan.
+    overlay_project = dry_run ? sync_project_data : _without_added_backends(sync_project_data, source_project, requested)
+    project_path = reusable ? joinpath(env_dir, "Project.toml") : _write_environment!(overlay_project, source_manifest, env_dir)
     warned = _maybe_warn_about_persisted_env(source_root, env_dir; persisted = persisted, warn_if_unignored = warn_if_unignored)
 
     if dry_run
@@ -555,14 +581,20 @@ function _sync_overlay!(
             end
         end
 
+        failures = reusable ? _stored_failures(env_dir) : Dict{String, Any}()
         if reusable
-            installed, retried = _retry_missing_backends!(project_path, requested, checker, only_first, io)
+            due = b -> retry_failed || _retry_due(b, failures)
+            installed, retried, attempted = _retry_missing_backends!(
+                project_path, requested, checker, only_first, io; entries = sync_project_data, due,
+            )
             # Retried backends were just checked; check only the ones kept from before.
             kept_functional = resolve_backends(setdiff(installed, retried); checker = checker)
             functional = filter(b -> b in retried || b in kept_functional, installed)
         else
             developed = _develop_overlay_path_sources!(sync_project_data, io)
-            installed, functional = _install_and_filter_backends!(requested, checker, only_first, io)
+            installed, functional, attempted = _install_and_filter_backends!(
+                requested, checker, only_first, io; entries = sync_project_data,
+            )
             sources_changed = _restore_overlay_sources!(project_path, sync_project_data)
             if developed || sources_changed || isempty(installed)
                 Pkg.instantiate(; io = io)
@@ -572,7 +604,10 @@ function _sync_overlay!(
         # Pkg rewrites Project.toml whenever a backend is added or removed, so record
         # the result, or the next reuse check would see a mismatch and rebuild.
         sync_state["project_toml"] = read(project_path, String)
-        persisted && _write_sync_state!(env_dir, sync_state)
+        if persisted
+            sync_state["failed_backends"] = _record_failures!(failures, attempted, functional)
+            _write_sync_state!(env_dir, sync_state)
+        end
         restore_previous_project || _load_functional_backends!(functional)
 
         success = true
@@ -633,20 +668,25 @@ function _install_and_filter_backends!(
         requested::AbstractVector{Symbol},
         checker::Function,
         only_first::Bool,
-        io::IO,
+        io::IO;
+        entries::AbstractDict = _backend_entries(requested),
     )
+    # Also returns the backends it tried, so failures can be recorded.
     if only_first
+        attempted = Symbol[]
         for backend in requested
-            _install_backend!(backend, io) || continue
+            push!(attempted, backend)
+            _install_backend!(backend, io; entries) || continue
             # Instantiate after each add so extension dependencies are present before
             # we import the backend for a functional check.
             Pkg.instantiate(; io = io)
-            isempty(_drop_nonfunctional!([backend], checker, b -> _remove_backend!(b, io))) || return [backend], [backend]
+            isempty(_drop_nonfunctional!([backend], checker, b -> _remove_backend!(b, io))) ||
+                return [backend], [backend], attempted
         end
-        return Symbol[], Symbol[]
+        return Symbol[], Symbol[], attempted
     else
-        installed = _drop_nonfunctional!(_install_backends!(requested, io), checker, b -> _remove_backend!(b, io))
-        return installed, copy(installed)
+        installed = _drop_nonfunctional!(_install_backends!(requested, io; entries), checker, b -> _remove_backend!(b, io))
+        return installed, copy(installed), filter(b -> haskey(BACKEND_SPECS, b), requested)
     end
 end
 
@@ -668,7 +708,8 @@ end
 # silently missing backend makes GPU test suites pass vacuously.
 function _warn_dropped_backend(backend::Symbol)
     @warn "Backend $(backend) was installed but failed its functional check; it is " *
-        "dropped for now and retried on the next activation. Run with " *
+        "dropped. A persisted environment retries it once the Julia version or the " *
+        "latest registered release changes, or with `retry_failed = true`. Run with " *
         "JULIA_DEBUG=GPUEnv to see the error." backend
     return nothing
 end
@@ -693,34 +734,89 @@ function _backends_to_retry(requested::AbstractVector{Symbol}, installed::Abstra
 end
 
 # On a reused overlay, retry the requested backends it lacks instead of rebuilding
-# it: a backend may have failed its check for a reason that has since gone away
-# (a login node without the driver, a stale precompile cache, a busy device).
-# Returns the backends the overlay holds afterwards and the retried ones among
-# them, which have just passed their functional check.
+# it: a backend may have failed for a reason that has since gone away (an older
+# Julia, a bug fixed in a new release). `due(backend)` says whether a missing
+# backend is worth retrying. Returns the backends the overlay holds afterwards,
+# the retried ones among them (which have just passed their functional check)
+# and the backends that were tried.
 function _retry_missing_backends!(
         project_path::AbstractString,
         requested::AbstractVector{Symbol},
         checker::Function,
         only_first::Bool,
-        io::IO,
+        io::IO;
+        entries::AbstractDict = _backend_entries(requested),
+        due::Function = _ -> true,
     )
     installed = _overlay_backends(project_path, requested)
-    missing = _backends_to_retry(requested, installed, only_first)
-    isempty(missing) && return installed, Symbol[]
+    missing = filter(due, _backends_to_retry(requested, installed, only_first))
+    isempty(missing) && return installed, Symbol[], Symbol[]
 
-    # `Pkg.rm` dropped the [compat] entry along with the dependency, so restore
-    # both before adding the package again, exactly as a fresh overlay has them.
-    _write_toml(project_path, _merge_backend_entries(TOML.parsefile(project_path), missing))
-    retried, _ = _install_and_filter_backends!(missing, checker, only_first, io)
-    # A backend whose install failed is still listed in the deps; take it out so
-    # the overlay stays resolvable.
-    foreach(b -> _remove_backend!(b, io), _overlay_backends(project_path, setdiff(missing, retried)))
+    retried, _, attempted = _install_and_filter_backends!(missing, checker, only_first, io; entries)
     if only_first && !isempty(retried)
         # A preferred backend works now: it replaces the one installed before.
         foreach(b -> _remove_backend!(b, io), installed)
     end
     isempty(retried) || Pkg.precompile(; io = io)
-    return _overlay_backends(project_path, requested), retried
+    return _overlay_backends(project_path, requested), retried, attempted
+end
+
+# Failed backends are recorded in the sync state with what could change the
+# outcome: the Julia version and the latest registered release of the package.
+_failure_record(backend::Symbol) = Dict{String, Any}(
+    "julia" => string(VERSION),
+    "latest_release" => string(something(_latest_registered_version(backend), "")),
+)
+
+function _stored_failures(env_dir::AbstractString)
+    state_path = _sync_state_path(env_dir)
+    isfile(state_path) || return Dict{String, Any}()
+    failures = get(TOML.parsefile(state_path), "failed_backends", nothing)
+    return failures isa Dict ? failures : Dict{String, Any}()
+end
+
+# Whether a missing `backend` should be retried: it never failed here, or the
+# Julia version or the latest registered release changed since it did.
+function _retry_due(backend::Symbol, failures::AbstractDict)
+    record = get(failures, String(backend), nothing)
+    record isa AbstractDict || return true
+    return record != _failure_record(backend)
+end
+
+function _record_failures!(failures::Dict{String, Any}, attempted, functional)
+    for backend in attempted
+        if backend in functional
+            delete!(failures, String(backend))
+        else
+            failures[String(backend)] = _failure_record(backend)
+        end
+    end
+    return failures
+end
+
+# Latest version of the package of `backend` in the local copies of the
+# reachable registries, or `nothing` when no registry has it.
+function _latest_registered_version(backend::Symbol)
+    spec = get(BACKEND_SPECS, backend, nothing)
+    spec === nothing && return nothing
+    uuid = Base.UUID(spec.uuid)
+    latest = nothing
+    try
+        for registry in Pkg.Registry.reachable_registries()
+            entry = get(registry, uuid, nothing)
+            entry === nothing && continue
+            # Pkg 1.10 takes the entry alone, newer versions the registry too.
+            info = applicable(Pkg.Registry.registry_info, entry) ?
+                Pkg.Registry.registry_info(entry) : Pkg.Registry.registry_info(registry, entry)
+            versions = keys(info.version_info)
+            isempty(versions) && continue
+            latest = latest === nothing ? maximum(versions) : max(latest, maximum(versions))
+        end
+    catch err
+        @debug "Could not read the registries" backend exception = (err, catch_backtrace())
+        return nothing
+    end
+    return latest
 end
 
 # Copy a manifest file to `dest`, rewriting any relative `path =` entries to
@@ -1075,13 +1171,39 @@ function _backend_module(backend::Symbol)
     return Base.require(_pkgid(BACKEND_SPECS[backend]))
 end
 
-function _install_backend!(backend::Symbol, io::IO)
+function _install_backend!(backend::Symbol, io::IO; entries::AbstractDict = _backend_entries([backend]))
     spec = get(BACKEND_SPECS, backend, nothing)
     spec === nothing && return false
-    return _install_package!(spec.package, io)
+    return _add_backends!(() -> _install_package!(spec.package, io), [spec], entries)
 end
 
-function _install_backends!(backends::AbstractVector{Symbol}, io::IO)
+# The [deps] and [compat] entries GPUEnv gives `backends` when the source
+# project has none for them.
+_backend_entries(backends::AbstractVector{Symbol}) =
+    _merge_backend_entries(Dict{String, Any}(), filter(b -> haskey(BACKEND_SPECS, b), backends))
+
+# Run `add()` with the [deps] and [compat] entries `entries` gives the packages of
+# `specs` written into the active project first, so Pkg resolves them with their
+# compat bounds. Pkg resolves the whole project, so the entries go in only for
+# this batch and are taken out again when `add()` fails: an unresolvable backend
+# must not block the others.
+function _add_backends!(add::Function, specs::AbstractVector, entries::AbstractDict)
+    project_path = Base.active_project()
+    original = read(project_path, String)
+    project = TOML.parsefile(project_path)
+    entry_compat = get(entries, "compat", Dict{String, Any}())
+    for spec in specs
+        get!(project, "deps", Dict{String, Any}())[spec.package] = spec.uuid
+        haskey(entry_compat, spec.package) &&
+            (get!(project, "compat", Dict{String, Any}())[spec.package] = entry_compat[spec.package])
+    end
+    _write_toml(project_path, project)
+    add() && return true
+    write(project_path, original)
+    return false
+end
+
+function _install_backends!(backends::AbstractVector{Symbol}, io::IO; entries::AbstractDict = _backend_entries(backends))
     specs = [get(BACKEND_SPECS, backend, nothing) for backend in backends]
     if all(spec -> spec === nothing, specs)
         @warn "None of the requested backends have known packages to install." requested_backends = backends
@@ -1092,13 +1214,15 @@ function _install_backends!(backends::AbstractVector{Symbol}, io::IO)
         @warn "Some of the requested backends do not have known packages to install." unknown_backends = unknown_backends
         specs = filter(!isnothing, specs)
     end
-    success = _install_packages!([spec.package for spec in specs], io)
+    success = _add_backends!(specs, entries) do
+        _install_packages!([spec.package for spec in specs], io)
+    end
     if success
         return [spec.name for spec in specs]
     else
         installed = Symbol[]
         for spec in specs
-            success = _install_package!(spec.package, io)
+            success = _add_backends!(() -> _install_package!(spec.package, io), [spec], entries)
             if success
                 push!(installed, spec.name)
             else

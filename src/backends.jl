@@ -23,8 +23,8 @@ const NATIVE_BACKENDS = (:CUDA, :AMDGPU, :Metal, :oneAPI, :OpenCL)
 
 # Native backends that implement the AbstractFFTs interface (`plan_fft` etc.)
 # for their array type, mapped to the first package version that does so.
-# Metal gained it in v1.10 (MPSGraph, Float32/Float16 only); oneAPI and OpenCL
-# do not provide it.
+# Metal gained it in v1.10 (MPSGraph); it has no Float64, so `gpu_backends`
+# drops it unless `require_float64 = false`. oneAPI and OpenCL do not provide it.
 const FFTW_NATIVE_BACKENDS = Dict(
     :CUDA => v"0",
     :AMDGPU => v"0",
@@ -190,7 +190,9 @@ Predict which GPU backends should be attempted on this host.
 
 `probe` is a pure function that receives a backend symbol and returns `true`
 when the backend should be installed. The default probe uses direct host hints
-first and falls back to command-based checks without importing GPU packages.
+(device nodes, PCI vendor IDs, Apple silicon) first and falls back to looking
+for the backend's driver library, without importing GPU packages; see
+[`default_backend_probe`](@ref).
 
 # Arguments
 - `include_jlarrays::Bool=true`: whether to include JLArrays in the prediction
@@ -358,9 +360,16 @@ all native backends supported by GPUEnv). Pass an explicit list such as
 `[:CUDA, :AMDGPU]` if you want to narrow the query set. Set
 `supports_fftw = true` to include only backends that support FFTW-based
 operators, that is, backends implementing the AbstractFFTs interface for their
-array type: JLArrays requires Julia 1.11+, Metal requires Metal.jl 1.10+ (and
-transforms only `Float32`/`Float16` data, real or complex), and oneAPI / OpenCL
-are always excluded because they do not provide an FFT backend.
+array type: JLArrays requires Julia 1.11+, Metal requires Metal.jl 1.10+, and
+oneAPI / OpenCL are always excluded because they do not provide an FFT backend.
+
+Not every device supports `Float64`: Apple GPUs (Metal) never do, and some
+Intel GPUs (oneAPI) and OpenCL devices do not either. Set
+`require_float64 = true` to keep only backends whose device does, as reported
+by [`supports_float64`](@ref). It defaults to `supports_fftw`, so an FFT query
+returns backends that transform `Float64` data like FFTW does; pass
+`supports_fftw = true, require_float64 = false` to also get Metal, whose FFTs
+take `Float32`/`Float16` data only.
 
 # Arguments
 - `include_jlarrays::Union{Nothing,Bool}=nothing`: whether to include the JLArrays mock backend.
@@ -369,6 +378,7 @@ are always excluded because they do not provide an FFT backend.
   Providing an explicit value that contradicts `backends_to_test` throws an `ArgumentError`.
 - `backends_to_test::AbstractVector{Symbol}`: which native backends to probe (default: all supported)
 - `supports_fftw::Bool=false`: if true, only return backends supporting FFTW-based operations
+- `require_float64::Bool=supports_fftw`: if true, only return backends whose device supports `Float64`
 
 # Examples
 ```jldoctest
@@ -390,6 +400,7 @@ function gpu_backends(
         include_jlarrays::Union{Nothing, Bool} = nothing,
         backends_to_test::AbstractVector{Symbol} = collect(NATIVE_BACKENDS),
         supports_fftw::Bool = false,
+        require_float64::Bool = supports_fftw,
     )
     # gpu_backends defaults to include_jlarrays=true (historic default).
     # _validate_and_resolve_include_jlarrays with default_jlarrays=true implements this.
@@ -399,38 +410,80 @@ function gpu_backends(
 
     backends = GpuBackend[]
 
-    if resolved_jlarrays && (!supports_fftw || _supports_fftw(:JLArrays))
+    if resolved_jlarrays && (!supports_fftw || _supports_fftw(:JLArrays, nothing))
         binding = _loaded_binding(:JLArrays)
         if binding !== nothing
             push!(backends, GpuBackend(:JLArray, binding...))
         end
     end
 
-    fftw_native = supports_fftw ? filter(b -> haskey(FFTW_NATIVE_BACKENDS, b), native_backends) : native_backends
-    for backend in resolve_backends(collect(fftw_native))
+    # Skip the functional check of backends that cannot pass the filters anyway.
+    supports_fftw && (native_backends = filter(b -> haskey(FFTW_NATIVE_BACKENDS, b), native_backends))
+    for backend in resolve_backends(collect(native_backends))
         binding = _loaded_binding(backend)
         binding === nothing && continue
         supports_fftw && !_supports_fftw(backend, binding[1]) && continue
+        require_float64 && !_supports_float64(backend, binding[1]) && continue
         push!(backends, GpuBackend(nameof(binding[1]), binding...))
     end
 
     return backends
 end
 
-# Whether `backend` implements AbstractFFTs for its arrays. JLArrays does from
-# Julia 1.11 on; a native backend must be loaded to know its version.
-function _supports_fftw(backend::Symbol)
+# Whether `backend` at package `version` implements AbstractFFTs for its arrays.
+# JLArrays does from Julia 1.11 on; an unknown version is trusted.
+function _supports_fftw(backend::Symbol, version::Union{Nothing, VersionNumber})
     backend === :JLArrays && return VERSION >= v"1.11"
-    binding = _loaded_binding(backend)
-    return binding !== nothing && _supports_fftw(backend, binding[1])
-end
-
-# Whether the loaded `module_ref` of native `backend` implements AbstractFFTs.
-function _supports_fftw(backend::Symbol, module_ref::Module)
     min_version = get(FFTW_NATIVE_BACKENDS, backend, nothing)
     min_version === nothing && return false
-    version = pkgversion(module_ref)
     return version === nothing || version >= min_version
+end
+_supports_fftw(backend::Symbol, module_ref::Module) = _supports_fftw(backend, pkgversion(module_ref))
+
+"""
+    supports_float64(backend::GpuBackend) -> Bool
+
+Return whether the active device of `backend` supports `Float64` arrays and
+kernels. CUDA, AMDGPU and JLArrays always do and Metal never does. For oneAPI
+and OpenCL the device is asked, since only some Intel GPUs and OpenCL devices
+have double-precision support.
+
+Use it to pick the element type of a test, or filter with
+`gpu_backends(; require_float64 = true)`.
+
+# Arguments
+- `backend::GpuBackend`: the backend whose device to query
+
+# Examples
+```julia
+for backend in gpu_backends()
+    T = supports_float64(backend) ? Float64 : Float32
+    x = backend(rand(T, 16))
+end
+```
+"""
+supports_float64(backend::GpuBackend) =
+    is_jlarray_backend(backend) || _supports_float64(nameof(backend.module_ref), backend.module_ref)
+
+function _supports_float64(backend::Symbol, module_ref::Module)
+    backend === :Metal && return false
+    backend in (:oneAPI, :OpenCL) || return true
+    try
+        if backend === :oneAPI
+            # The query documented in the oneAPI.jl README.
+            L0 = getfield(module_ref, :oneL0)
+            flag = getfield(L0, :ZE_DEVICE_MODULE_FLAG_FP64)
+            device = Base.invokelatest(getfield(module_ref, :device))
+            properties = Base.invokelatest(getfield(L0, :module_properties), device)
+            return properties.fp64flags & flag == flag
+        else
+            cl = getfield(module_ref, :cl)
+            return "cl_khr_fp64" in Base.invokelatest(getfield(cl, :device)).extensions
+        end
+    catch err
+        @debug "Float64 support query failed" backend exception = (err, catch_backtrace())
+        return false
+    end
 end
 
 """
@@ -553,9 +606,11 @@ gpu_wrapper(backend::GpuBackend, ::Type{T}, dims...) where {T} =
 Return whether `backend` is likely available on the current host.
 
 This first checks direct host-level hardware hints and, when they are
-inconclusive, looks for the backend's driver library (for example `libcuda`,
-`libamdhip64` or `libze_loader`). It does not import any GPU packages and does
-not need vendor command-line tools such as `nvidia-smi`.
+inconclusive, looks for the backend's driver library file (for example
+`libcuda`, `libamdhip64` or `libze_loader`) on the loader search path. It does
+not import any GPU packages, does not load the driver libraries and does not
+need vendor command-line tools such as `nvidia-smi`. OpenCL is predicted from
+hardware hints only, because its ICD loader is common on machines without a GPU.
 
 # Arguments
 - `backend::Symbol`: the backend name to check (`:CUDA`, `:AMDGPU`, etc.)
@@ -571,6 +626,10 @@ function default_backend_probe(
     haskey(BACKEND_SPECS, backend) || return false
 
     get(hardware, backend, false) && return true
+    # The OpenCL ICD loader is installed on many machines without a GPU, and
+    # OpenCL.jl brings a CPU runtime that passes the functional check, so a
+    # loader alone must not predict OpenCL.
+    backend === :OpenCL && return false
     return fallback(backend)
 end
 
@@ -645,8 +704,10 @@ const OPENCL_MACOS_HINT_PATHS = (
 
 # Driver libraries each backend loads at runtime, as `(unix names, windows names)`.
 # Finding one means the vendor driver is installed, without running any vendor
-# tool. OpenCL uses the ICD loader. Metal is absent because the macOS
-# architecture check is conclusive.
+# tool. Metal is absent because the macOS architecture check is conclusive, and
+# oneAPI has no Windows entry because oneAPI.jl supports Linux only. OpenCL's
+# entry (the ICD loader) only feeds `report_backends`; `default_backend_probe`
+# does not predict OpenCL from it.
 #
 # The driver-library probing (this table and `_driver_library_probe`), the Apple
 # silicon check for Metal and `report_backends` are adapted from GPUSelect.jl
@@ -656,9 +717,61 @@ const OPENCL_MACOS_HINT_PATHS = (
 const BACKEND_DRIVER_LIBRARIES = Dict(
     :CUDA => (["libcuda", "libcuda.so.1"], ["nvcuda"]),
     :AMDGPU => (["libamdhip64", "libhip_hcc"], ["amdhip64", "amdhip64_6", "amdhip64_7"]),
-    :oneAPI => (["libze_loader", "libze_loader.so.1"], ["ze_loader"]),
+    :oneAPI => (["libze_loader", "libze_loader.so.1"], String[]),
     :OpenCL => (["libOpenCL", "libOpenCL.so.1"], ["OpenCL"]),
 )
+
+# Path of the first of the libraries `names` found on the loader search path, or
+# "". Only looks for the file: `Libdl.find_library` would `dlopen` it and run the
+# driver's initializers, which can hang or crash on a broken install.
+function _find_library_file(
+        names::AbstractVector{<:AbstractString};
+        os::Symbol = _host_os(),
+        env::AbstractDict = ENV,
+        system_libraries::Function = _system_libraries,
+    )
+    if os === :windows
+        dirs = String.(split(get(env, "PATH", ""), ';'))
+        push!(dirs, joinpath(get(env, "SystemRoot", raw"C:\Windows"), "System32"))
+        files = [name * ".dll" for name in names]
+    else
+        dirs = String.(split(get(env, os === :macos ? "DYLD_LIBRARY_PATH" : "LD_LIBRARY_PATH", ""), ':'))
+        append!(dirs, ("/usr/lib64", "/usr/lib", "/lib64", "/lib"))
+        extension = os === :macos ? ".dylib" : ".so"
+        files = vcat(names, [name * extension for name in names])
+    end
+    for file in files, dir in dirs
+        isempty(dir) && continue
+        path = joinpath(dir, file)
+        isfile(path) && return path
+    end
+    os === :linux || return ""
+    known = system_libraries()
+    for file in files
+        haskey(known, file) && return known[file]
+    end
+    return ""
+end
+
+const _SYSTEM_LIBRARIES = Ref{Union{Nothing, Dict{String, String}}}(nothing)
+
+# The libraries in the dynamic linker cache (`ldconfig -p`), as name => path.
+# Read once per session; empty when `ldconfig` is unavailable.
+function _system_libraries()
+    cached = _SYSTEM_LIBRARIES[]
+    cached === nothing || return cached
+    libraries = Dict{String, String}()
+    ldconfig = something(Sys.which("ldconfig"), "/sbin/ldconfig")
+    try
+        for line in eachline(pipeline(`$ldconfig -p`; stderr = devnull))
+            m = match(r"^\s*(\S+)\s.*=>\s*(\S+)\s*$", line)
+            m === nothing || get!(libraries, m.captures[1], m.captures[2])
+        end
+    catch err
+        @debug "Could not read the dynamic linker cache" exception = (err, catch_backtrace())
+    end
+    return _SYSTEM_LIBRARIES[] = libraries
+end
 
 _read_text(path::AbstractString) = read(path, String)
 
@@ -724,12 +837,12 @@ function _detect_macos_gpu_hardware!(detected::Dict{Symbol, Bool}; ispath::Funct
     return detected
 end
 
-# Return whether the driver library of `backend` can be found by the dynamic loader.
+# Return whether the driver library of `backend` is on the loader search path.
 # Adapted from GPUSelect.jl's `find_gpu_pkgid`, see BACKEND_DRIVER_LIBRARIES.
 function _driver_library_probe(
         backend::Symbol;
         os::Symbol = _host_os(),
-        find_library::Function = Libdl.find_library,
+        find_library::Function = names -> _find_library_file(names; os),
     )
     libraries = get(BACKEND_DRIVER_LIBRARIES, backend, nothing)
     libraries === nothing && return false
@@ -757,8 +870,10 @@ For JLArrays and each native backend the report shows:
   environment (the load path),
 - **functional**: the result of the functional check, run only for installed
   backends, which loads the package,
-- **FFT**: whether the backend implements AbstractFFTs, as filtered by
-  `gpu_backends(; supports_fftw = true)`.
+- **Float64**: whether the device supports `Float64`, see [`supports_float64`](@ref),
+  shown for functional backends,
+- **FFT**: whether the installed package version implements AbstractFFTs, as
+  filtered by `gpu_backends(; supports_fftw = true)`.
 
 A backend is predicted by [`predict_backends`](@ref) when it has a hardware hint
 or a driver library. Nothing is installed. Call it from the REPL after
@@ -800,11 +915,13 @@ function report_backends(
         is_installed = installed(backend)
         functional = is_installed ? checker(backend) : nothing
         ok &= functional !== false
-        fft = functional === true ? _supports_fftw(backend) : nothing
-        push!(rows, [String(backend), yesno(hint), yesno(driver), yesno(is_installed), yesno(functional), yesno(fft)])
+        binding = functional === true && native ? _loaded_binding(backend) : nothing
+        float64 = !native ? true : binding === nothing ? nothing : _supports_float64(backend, binding[1])
+        fft = is_installed ? _supports_fftw(backend, _installed_version(backend)) : nothing
+        push!(rows, [String(backend), yesno(hint), yesno(driver), yesno(is_installed), yesno(functional), yesno(float64), yesno(fft)])
     end
 
-    header = ["backend", "hardware", "driver", "installed", "functional", "FFT"]
+    header = ["backend", "hardware", "driver", "installed", "functional", "Float64", "FFT"]
     widths = [maximum(length(row[i]) for row in vcat([header], rows)) for i in eachindex(header)]
     line(row) = rstrip("  " * join(rpad.(row, widths), "  "))
     bar = "─"^max(60, length(line(header)))
@@ -820,6 +937,19 @@ function report_backends(
     foreach(row -> println(io, line(row)), rows)
     println(io, bar)
     return ok
+end
+
+# Version of the package of `backend` that the load path resolves to, read from
+# its Project.toml, the same lookup `_backend_installed` uses.
+function _installed_version(backend::Symbol)
+    spec = get(BACKEND_SPECS, backend, nothing)
+    spec === nothing && return nothing
+    entry = Base.locate_package(_pkgid(spec))
+    entry === nothing && return nothing
+    project_path = joinpath(dirname(dirname(entry)), "Project.toml")
+    isfile(project_path) || return nothing
+    version = get(TOML.parsefile(project_path), "version", nothing)
+    return version === nothing ? nothing : VersionNumber(version)
 end
 
 # Whether the package of `backend` resolves to its known UUID from the load path.

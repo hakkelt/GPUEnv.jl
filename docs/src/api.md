@@ -15,6 +15,7 @@ GPUEnv.SyncResult
 GPUEnv.supported_backends
 GPUEnv.backend_specs
 GPUEnv.predict_backends
+GPUEnv.default_backend_probe
 GPUEnv.report_backends
 GPUEnv.backend_modules_and_array_types
 GPUEnv.resolve_backends
@@ -24,6 +25,7 @@ GPUEnv.resolve_backends
 
 ```@docs
 GPUEnv.gpu_backends
+GPUEnv.supports_float64
 GPUEnv.to_gpu
 GPUEnv.gpu_allocate
 GPUEnv.gpu_zeros

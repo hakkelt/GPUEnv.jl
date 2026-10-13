@@ -74,19 +74,30 @@ functional check (for example CUDA on a login node that has the NVIDIA driver bu
 GPU) is removed from the overlay, and GPUEnv warns:
 
 ```
-┌ Warning: Backend CUDA was installed but failed its functional check; it is dropped for now and retried on the next activation. Run with JULIA_DEBUG=GPUEnv to see the error.
+┌ Warning: Backend CUDA was installed but failed its functional check; it is dropped. A persisted environment retries it once the Julia version or the latest registered release changes, or with `retry_failed = true`. Run with JULIA_DEBUG=GPUEnv to see the error.
 ```
 
-A failure like this is often temporary, so the persisted overlay does not
-remember it. When the overlay is reused, GPUEnv compares the predicted backends
-with the ones in the overlay's `Project.toml`, adds back only the missing ones
-(with the same `[compat]` bounds a fresh overlay has) and checks them again.
-Nothing else is rebuilt. With `only_first = true` only the backends that come
-before the installed one in the preference order are retried; if one of them
-works now, it replaces the installed one.
+The persisted overlay records the failure in its state file, together with the
+Julia version and the latest release of the backend package in the local
+registry copy. When the overlay is reused, a backend missing from its
+`Project.toml` is retried only when one of those has changed since it failed,
+so a backend that can never work here does not cost a package add, load and
+removal on every run. A changed source project rebuilds the overlay, which
+retries every backend. To retry anyway, for example after fixing the driver,
+pass `retry_failed = true`:
 
-Retrying a backend that keeps failing costs a package add, load and removal on
-every run. Pass `exclude = [:CUDA]` (or the backend in question) on machines
-where it can never work.
+```julia
+GPUEnv.activate(; persist = true, retry_failed = true)
+```
+
+A retried backend is added back with the same `[compat]` bounds a fresh overlay
+has and checked again; nothing else is rebuilt. With `only_first = true` only
+the backends that come before the installed one in the preference order are
+retried; if one of them works now, it replaces the installed one. Pass
+`exclude = [:CUDA]` (or the backend in question) on machines where it can
+never work.
+
+Backends are added in one batch, and one at a time when the batch fails, so a
+backend that cannot be resolved on this platform does not keep the others out.
 
 Changing `only_first` between runs rebuilds the overlay.
