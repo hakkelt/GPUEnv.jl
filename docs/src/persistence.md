@@ -70,8 +70,8 @@ new fingerprint is recorded.
 ## Backends that fail their functional check
 
 Every predicted backend is installed and then checked; one that fails its
-functional check (for example CUDA on a login node that has the NVIDIA driver but no
-GPU) is removed from the overlay, and GPUEnv warns:
+functional check (for example CUDA in a container that has the NVIDIA driver mounted
+but no GPU passed through) is removed from the overlay, and GPUEnv warns:
 
 ```
 ┌ Warning: Backend CUDA was installed but failed its functional check; it is dropped. A persisted environment retries it once the Julia version or the latest registered release changes, or with `retry_failed = true`. Run with JULIA_DEBUG=GPUEnv to see the error.
