@@ -9,7 +9,7 @@ const _SYNC_STATE_FILENAME = ".GPUEnv-state.toml"
 # fingerprint check, which remains the cross-session/cross-process mechanism.
 struct _ActivateCacheKey
     source_key::String
-    include_jlarrays::Union{Nothing, Bool}
+    include_cpu_backends::Union{Nothing, Bool}
     backends_to_test::Vector{Symbol}
     exclude::Vector{Symbol}
     only_first::Bool
@@ -21,7 +21,7 @@ end
 
 function Base.:(==)(a::_ActivateCacheKey, b::_ActivateCacheKey)
     return a.source_key == b.source_key &&
-        a.include_jlarrays == b.include_jlarrays &&
+        a.include_cpu_backends == b.include_cpu_backends &&
         a.backends_to_test == b.backends_to_test &&
         a.exclude == b.exclude &&
         a.only_first == b.only_first &&
@@ -88,7 +88,7 @@ Clear the in-process `activate()` session cache. Exposed for tests only.
 _reset_activate_session_cache!() = (_ACTIVATE_SESSION_CACHE[] = nothing; nothing)
 
 """
-    sync_test_env(; path=nothing, include_jlarrays=nothing,
+    sync_test_env(; path=nothing, include_cpu_backends=nothing,
                   probe=default_backend_probe, checker=default_backend_checker,
                   backends_to_test=supported_backends(),
                   exclude=Symbol[], only_first=false,
@@ -112,7 +112,9 @@ packages.
 
 # Arguments
 - `path::Union{Nothing, AbstractString}=nothing`: path to a directory containing `Project.toml`; defaults to active project
-- `include_jlarrays::Union{Nothing,Bool}=nothing`: whether to include the JLArrays mock backend.
+- `include_cpu_backends::Union{Nothing,Bool}=nothing`: whether to include backends that run on
+  the CPU: the JLArrays mock backend, and OpenCL when its device is a CPU (for example the PoCL
+  runtime). When false, OpenCL counts as functional only on a non-CPU device.
   When `nothing` (default), set to `true` automatically if `:JLArrays` appears in `backends_to_test`,
     otherwise `false`. Providing an explicit value that contradicts a custom `backends_to_test`
     or `exclude` throws an `ArgumentError`.
@@ -138,7 +140,7 @@ packages.
 function sync_test_env(
         ;
         path::Union{Nothing, AbstractString} = nothing,
-        include_jlarrays::Union{Nothing, Bool} = nothing,
+        include_cpu_backends::Union{Nothing, Bool} = nothing,
         probe::Function = default_backend_probe,
         checker::Function = default_backend_checker,
         backends_to_test::Union{AbstractVector{Symbol}, Tuple{Vararg{Symbol}}} = supported_backends(),
@@ -152,17 +154,17 @@ function sync_test_env(
         io::IO = stderr,
     )
     requested_backends_to_test = collect(backends_to_test)
-    if include_jlarrays === false && requested_backends_to_test == collect(supported_backends())
+    if include_cpu_backends === false && requested_backends_to_test == collect(supported_backends())
         filter!(!=(:JLArrays), requested_backends_to_test)
     end
 
-    resolved_jlarrays, native_backends = _validate_and_resolve_include_jlarrays(
-        include_jlarrays, requested_backends_to_test, exclude; default_jlarrays = false,
+    resolved_cpu_backends, native_backends = _validate_and_resolve_include_cpu_backends(
+        include_cpu_backends, requested_backends_to_test, exclude; default_cpu_backends = false,
     )
     if path !== nothing
         return _sync_env_from_path_impl(
             abspath(path);
-            include_jlarrays = resolved_jlarrays,
+            include_cpu_backends = resolved_cpu_backends,
             probe = probe,
             checker = checker,
             backends_to_test = native_backends,
@@ -179,7 +181,7 @@ function sync_test_env(
     else
         return _sync_active_project_env_impl(
             ;
-            include_jlarrays = resolved_jlarrays,
+            include_cpu_backends = resolved_cpu_backends,
             probe = probe,
             checker = checker,
             backends_to_test = native_backends,
@@ -197,7 +199,7 @@ function sync_test_env(
 end
 
 """
-    activate(; path=nothing, include_jlarrays=nothing,
+    activate(; path=nothing, include_cpu_backends=nothing,
              probe=default_backend_probe, checker=default_backend_checker,
              backends_to_test=supported_backends(),
              exclude=Symbol[], only_first=false,
@@ -219,7 +221,9 @@ All keyword arguments are forwarded to [`sync_test_env`](@ref), but unlike
 
 # Arguments
 - `path::Union{Nothing, AbstractString}=nothing`: path to a directory containing `Project.toml`; defaults to active project
-- `include_jlarrays::Union{Nothing,Bool}=nothing`: whether to include the JLArrays mock backend.
+- `include_cpu_backends::Union{Nothing,Bool}=nothing`: whether to include backends that run on
+  the CPU: the JLArrays mock backend, and OpenCL when its device is a CPU (for example the PoCL
+  runtime). When false, OpenCL counts as functional only on a non-CPU device.
   When `nothing` (default), set to `true` automatically if `:JLArrays` appears in `backends_to_test`,
     otherwise `false`. Providing an explicit value that contradicts a custom `backends_to_test`
     or `exclude` throws an `ArgumentError`.
@@ -262,7 +266,7 @@ GPUEnv.activate(; persist = true)
 function activate(
         ;
         path::Union{Nothing, AbstractString} = nothing,
-        include_jlarrays::Union{Nothing, Bool} = nothing,
+        include_cpu_backends::Union{Nothing, Bool} = nothing,
         probe::Function = default_backend_probe,
         checker::Function = default_backend_checker,
         backends_to_test::Union{AbstractVector{Symbol}, Tuple{Vararg{Symbol}}} = supported_backends(),
@@ -276,12 +280,12 @@ function activate(
         io::IO = stderr,
     )
     requested_backends_to_test = collect(backends_to_test)
-    if include_jlarrays === false && requested_backends_to_test == collect(supported_backends())
+    if include_cpu_backends === false && requested_backends_to_test == collect(supported_backends())
         filter!(!=(:JLArrays), requested_backends_to_test)
     end
 
-    resolved_jlarrays, native_backends = _validate_and_resolve_include_jlarrays(
-        include_jlarrays, requested_backends_to_test, exclude; default_jlarrays = false,
+    resolved_cpu_backends, native_backends = _validate_and_resolve_include_cpu_backends(
+        include_cpu_backends, requested_backends_to_test, exclude; default_cpu_backends = false,
     )
 
     normalized_environment_path = environment_path === nothing ? nothing : abspath(environment_path)
@@ -294,7 +298,7 @@ function activate(
             source_root = _resolve_source_root_for_cache(path, cached)
             manifest_fingerprint = _source_manifest_fingerprint(source_root)
             cache_key = _ActivateCacheKey(
-                source_key, include_jlarrays, native_backends, collect(exclude),
+                source_key, include_cpu_backends, native_backends, collect(exclude),
                 only_first, persist, normalized_environment_path, warn_if_unignored,
                 manifest_fingerprint,
             )
@@ -317,7 +321,7 @@ function activate(
     result = if path !== nothing
         _sync_env_from_path_impl(
             abspath(path);
-            include_jlarrays = resolved_jlarrays,
+            include_cpu_backends = resolved_cpu_backends,
             probe = probe,
             checker = checker,
             backends_to_test = native_backends,
@@ -334,7 +338,7 @@ function activate(
     else
         _sync_active_project_env_impl(
             ;
-            include_jlarrays = resolved_jlarrays,
+            include_cpu_backends = resolved_cpu_backends,
             probe = probe,
             checker = checker,
             backends_to_test = native_backends,
@@ -356,7 +360,7 @@ function activate(
         if source_key !== nothing && active_now !== nothing
             manifest_fingerprint = _source_manifest_fingerprint(dirname(result.source_project_path))
             cache_key = _ActivateCacheKey(
-                source_key, include_jlarrays, native_backends, collect(exclude),
+                source_key, include_cpu_backends, native_backends, collect(exclude),
                 only_first, persist, normalized_environment_path, warn_if_unignored,
                 manifest_fingerprint,
             )
@@ -399,7 +403,7 @@ end
 
 function _sync_active_project_env_impl(
         ;
-        include_jlarrays::Bool,
+        include_cpu_backends::Bool,
         probe::Function,
         checker::Function,
         backends_to_test::AbstractVector{Symbol},
@@ -428,7 +432,7 @@ function _sync_active_project_env_impl(
     requested = _filter_backends(
         predict_backends(
             ;
-            include_jlarrays = include_jlarrays,
+            include_cpu_backends = include_cpu_backends,
             probe = probe,
             backends_to_test = backends_to_test,
         ),
@@ -457,7 +461,7 @@ function _sync_active_project_env_impl(
         stripped_paths = stripped_paths,
         checker = checker,
         only_first = only_first,
-        include_jlarrays = include_jlarrays,
+        include_cpu_backends = include_cpu_backends,
         persist = persist,
         environment_path = environment_path,
         warn_if_unignored = warn_if_unignored,
@@ -470,7 +474,7 @@ end
 
 function _sync_env_from_path_impl(
         root::AbstractString;
-        include_jlarrays::Bool,
+        include_cpu_backends::Bool,
         probe::Function,
         checker::Function,
         backends_to_test::AbstractVector{Symbol},
@@ -495,7 +499,7 @@ function _sync_env_from_path_impl(
     requested = _filter_backends(
         predict_backends(
             ;
-            include_jlarrays = include_jlarrays,
+            include_cpu_backends = include_cpu_backends,
             probe = probe,
             backends_to_test = backends_to_test,
         ),
@@ -516,7 +520,7 @@ function _sync_env_from_path_impl(
         stripped_paths = stripped_paths,
         checker = checker,
         only_first = only_first,
-        include_jlarrays = include_jlarrays,
+        include_cpu_backends = include_cpu_backends,
         persist = persist,
         environment_path = environment_path,
         warn_if_unignored = warn_if_unignored,
@@ -542,7 +546,7 @@ function _sync_overlay!(
         stripped_paths::AbstractVector{<:AbstractString},
         checker::Function,
         only_first::Bool,
-        include_jlarrays::Bool,
+        include_cpu_backends::Bool,
         persist::Bool,
         environment_path::Union{Nothing, AbstractString},
         warn_if_unignored::Bool,
@@ -551,6 +555,9 @@ function _sync_overlay!(
         io::IO,
         restore_previous_project::Bool,
     )
+    if checker === default_backend_checker
+        checker = backend -> default_backend_checker(backend; include_cpu_backends)
+    end
     env_dir, persisted = _environment_dir(source_root; persist = persist, environment_path = environment_path)
     sync_state = _sync_state_data(sync_project_data, source_manifest, requested, only_first)
     reusable = _can_reuse_persisted_env(sync_state, env_dir; persisted = persisted)
@@ -564,7 +571,7 @@ function _sync_overlay!(
     if dry_run
         return SyncResult(
             env_dir, project_path, source_path, requested, Symbol[], Symbol[],
-            include_jlarrays, persisted, source_kind, warned, true,
+            include_cpu_backends, persisted, source_kind, warned, true,
         )
     end
 
@@ -581,8 +588,17 @@ function _sync_overlay!(
             end
         end
 
-        failures = reusable ? _stored_failures(env_dir) : Dict{String, Any}()
+        stored = reusable ? _stored_sync_state(env_dir) : Dict{String, Any}()
+        failures = get(stored, "failed_backends", nothing)
+        failures isa Dict || (failures = Dict{String, Any}())
+        # A fresh overlay adds packages, which refreshes the registries.
+        registries_updated = reusable ? Float64(get(stored, "registries_updated", 0.0)) : time()
         if reusable
+            if !retry_failed && !isempty(failures)
+                # `_retry_due` compares against the local registry copy, which
+                # reusing an overlay never refreshes.
+                registries_updated = _refresh_registries(registries_updated, io)
+            end
             due = b -> retry_failed || _retry_due(b, failures)
             installed, retried, attempted = _retry_missing_backends!(
                 project_path, requested, checker, only_first, io; entries = sync_project_data, due,
@@ -606,6 +622,7 @@ function _sync_overlay!(
         sync_state["project_toml"] = read(project_path, String)
         if persisted
             sync_state["failed_backends"] = _record_failures!(failures, attempted, functional)
+            sync_state["registries_updated"] = registries_updated
             _write_sync_state!(env_dir, sync_state)
         end
         restore_previous_project || _load_functional_backends!(functional)
@@ -618,7 +635,7 @@ function _sync_overlay!(
             requested,
             installed,
             functional,
-            include_jlarrays,
+            include_cpu_backends,
             persisted,
             source_kind,
             warned,
@@ -768,11 +785,24 @@ _failure_record(backend::Symbol) = Dict{String, Any}(
     "latest_release" => string(something(_latest_registered_version(backend), "")),
 )
 
-function _stored_failures(env_dir::AbstractString)
+function _stored_sync_state(env_dir::AbstractString)
     state_path = _sync_state_path(env_dir)
-    isfile(state_path) || return Dict{String, Any}()
-    failures = get(TOML.parsefile(state_path), "failed_backends", nothing)
-    return failures isa Dict ? failures : Dict{String, Any}()
+    return isfile(state_path) ? TOML.parsefile(state_path) : Dict{String, Any}()
+end
+
+const _REGISTRY_UPDATE_INTERVAL = 6 * 60 * 60.0
+
+# Update the registries when the last update recorded for this overlay is more
+# than 6 hours old, and return the time of the last update. A failed update
+# (for example offline) also counts, so it is not retried on every activation.
+function _refresh_registries(last_update::Real, io::IO; now::Real = time(), update::Function = () -> Pkg.Registry.update(; io))
+    now - last_update < _REGISTRY_UPDATE_INTERVAL && return Float64(last_update)
+    try
+        update()
+    catch err
+        @debug "Could not update the registries" exception = (err, catch_backtrace())
+    end
+    return Float64(now)
 end
 
 # Whether a missing `backend` should be retried: it never failed here, or the
@@ -1098,13 +1128,13 @@ function _write_sync_state!(env_dir::AbstractString, sync_state::Dict{String, An
     return nothing
 end
 
-function default_backend_checker(backend::Symbol)
+function default_backend_checker(backend::Symbol; include_cpu_backends::Bool = true)
     backend === :JLArrays && return true
     haskey(BACKEND_SPECS, backend) || return false
 
     try
         module_ref = _backend_module(backend)
-        return _backend_functional(module_ref, backend)
+        return _backend_functional(module_ref, backend; allow_cpu = include_cpu_backends)
     catch err
         @debug "Backend functional check failed" backend exception = (err, catch_backtrace())
         return false
@@ -1125,22 +1155,31 @@ function default_backend_binding(backend::Symbol)
     end
 end
 
-function _backend_functional(module_ref::Module, backend::Symbol)
+function _backend_functional(module_ref::Module, backend::Symbol; allow_cpu::Bool = true)
     if backend === :OpenCL
-        return _opencl_backend_functional(module_ref)
+        return _opencl_backend_functional(module_ref; allow_cpu)
     end
 
     isdefined(module_ref, :functional) || return false
     return Base.invokelatest(getfield(module_ref, :functional))
 end
 
-function _opencl_backend_functional(module_ref::Module)
+# `allow_cpu = false` rejects a CPU device, such as the PoCL runtime, which runs
+# kernels fine but is not a GPU.
+function _opencl_backend_functional(module_ref::Module; allow_cpu::Bool = true)
     isdefined(module_ref, :cl) || return false
     cl = getfield(module_ref, :cl)
     isdefined(cl, :platforms) || return false
 
     platforms = Base.invokelatest(getfield(cl, :platforms))
     isempty(platforms) && return false
+    if !allow_cpu
+        device = Base.invokelatest(getfield(cl, :device))
+        if device.device_type === :cpu
+            @debug "OpenCL runs on a CPU device" device
+            return false
+        end
+    end
     isdefined(cl, :devices) || return true
 
     devices = getfield(cl, :devices)

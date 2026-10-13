@@ -66,9 +66,9 @@ actually work on the current machine.
 using GPUEnv
 using Test
 
-GPUEnv.activate(; include_jlarrays = true, persist = true)
+GPUEnv.activate(; include_cpu_backends = true, persist = true)
 
-for backend in gpu_backends(; include_jlarrays = true)
+for backend in gpu_backends(; include_cpu_backends = true)
     x = gpu_ones(backend, Float32, 64, 64)
     y = gpu_ones(backend, Float32, 64, 64) .* 2
     @test Array(x + y) == 3f0 .* ones(64, 64)
@@ -81,18 +81,19 @@ available.
 
 ## Use case 2: benchmark overlays
 
-Benchmarks usually should not include JLArrays because the CPU-side mock is not
-representative. In that case, ask GPUEnv for native backends only and skip the
-run when none is available.
+Benchmarks usually should not include CPU backends: the JLArrays mock and
+OpenCL on a CPU device (such as the PoCL runtime) are not representative. In
+that case, set `include_cpu_backends = false` to get GPU backends only, and skip
+the run when none is available.
 
 ```julia
 # benchmark/gpu_benchmark.jl
 using GPUEnv
 using BenchmarkTools
 
-GPUEnv.activate(; include_jlarrays = false, only_first = true)
+GPUEnv.activate(; include_cpu_backends = false, only_first = true)
 
-backends = gpu_backends(; include_jlarrays = false)
+backends = gpu_backends(; include_cpu_backends = false)
 if isempty(backends)
     println("No functional native GPU backend found; skipping benchmark run.")
 else
@@ -121,7 +122,7 @@ using GPUEnv
 predicted = predict_backends()
 @show predicted
 
-for backend in gpu_backends(; include_jlarrays = true)
+for backend in gpu_backends(; include_cpu_backends = true)
     x = gpu_zeros(backend, Float32, 64, 64)
     y = gpu_ones(backend, Float32, 64, 64)
     z = gpu_randn(backend, Float32, 64, 64)
@@ -157,7 +158,7 @@ and re-check only the backends that are missing, so an overlay first built on a
 machine without a working GPU picks up the GPU once one is available.
 
 ```julia
-GPUEnv.activate(; include_jlarrays = true, persist = true)
+GPUEnv.activate(; include_cpu_backends = true, persist = true)
 ```
 
 If the persisted environment lives inside a Git repository, add `gpu_env/` to
@@ -194,6 +195,15 @@ rather than a package test suite. The two differ in what they set up:
 GPUEnv's driver-library detection and `report_backends` are adapted from
 GPUSelect.jl's `find_gpu_pkgid` and `test_backends` (MIT License, Copyright (c)
 2026 Simon Danisch, ReynKo, and contributors; see `THIRD_PARTY_NOTICES.md`).
+
+## Upgrading from 0.2
+
+- `include_jlarrays` is now `include_cpu_backends` (also the `SyncResult`
+  field). Setting it to `false` also drops OpenCL when its device is a CPU.
+- `gpu_backends(; supports_fftw = true)` keeps returning only backends that
+  transform `Float64` data; Metal needs `require_float64 = false`.
+- A persisted overlay retries a failed backend only when the Julia version or
+  the backend's latest release changes; pass `retry_failed = true` to force it.
 
 ## API summary
 

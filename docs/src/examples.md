@@ -65,14 +65,15 @@ non-workspace test-project case.
 
 ## 2) Benchmark overlays
 
-Run benchmarks from the benchmark environment and skip JLArrays by default:
+Run benchmarks from the benchmark environment and skip the CPU backends
+(JLArrays, and OpenCL on a CPU device):
 
 ```julia
 using GPUEnv
 
-GPUEnv.activate(include_jlarrays = false, only_first = true)
+GPUEnv.activate(include_cpu_backends = false, only_first = true)
 
-backends = gpu_backends(; include_jlarrays = false)
+backends = gpu_backends(; include_cpu_backends = false)
 if isempty(backends)
     println("No functional native backend found; skipping benchmark run.")
 else

@@ -66,9 +66,9 @@ coverage and real GPU backends whenever they are available.
 using GPUEnv
 using Test
 
-GPUEnv.activate(; include_jlarrays = true, persist = true)
+GPUEnv.activate(; include_cpu_backends = true, persist = true)
 
-for backend in gpu_backends(; include_jlarrays = true)
+for backend in gpu_backends(; include_cpu_backends = true)
     x = gpu_ones(backend, Float32, 64, 64)
     y = gpu_ones(backend, Float32, 64, 64) .* 2
     @test Array(x + y) == 3f0 .* ones(64, 64)
@@ -81,17 +81,18 @@ available.
 
 ## Benchmark overlays
 
-Benchmarks should usually skip JLArrays and use the first functional native
-backend, or skip cleanly when no real GPU backend is available.
+Benchmarks should usually skip CPU backends (the JLArrays mock and OpenCL on a
+CPU device such as PoCL) and use the first functional GPU backend, or skip
+cleanly when none is available.
 
 ```julia
 # benchmark/gpu_benchmark.jl
 using GPUEnv
 using BenchmarkTools
 
-GPUEnv.activate(; include_jlarrays = false, only_first = true)
+GPUEnv.activate(; include_cpu_backends = false, only_first = true)
 
-backends = gpu_backends(; include_jlarrays = false)
+backends = gpu_backends(; include_cpu_backends = false)
 if isempty(backends)
     println("No functional native GPU backend found; skipping benchmark run.")
 else
@@ -119,7 +120,7 @@ using GPUEnv
 predicted = predict_backends()
 @show predicted
 
-for backend in gpu_backends(; include_jlarrays = true)
+for backend in gpu_backends(; include_cpu_backends = true)
     x = gpu_zeros(backend, Float32, 64, 64)
     y = gpu_ones(backend, Float32, 64, 64)
     z = gpu_randn(backend, Float32, 64, 64)
@@ -179,7 +180,7 @@ Query and use the available backends after `activate` has run:
 backends = gpu_backends()                               # all functional native backends
 backends_fftw = gpu_backends(; supports_fftw = true)   # only AbstractFFTs-capable, with Float64
 backends_f64 = gpu_backends(; require_float64 = true)  # only devices that support Float64
-backends_jl = gpu_backends(; include_jlarrays = true)  # also include JLArrays mock
+backends_jl = gpu_backends(; include_cpu_backends = true)  # also include JLArrays mock
 
 for backend in backends
     x = gpu_randn(backend, Float32, 128, 128)
@@ -237,14 +238,19 @@ environment but do not want to leave that environment active. Use `activate`
 when the synchronized GPU environment should stay active for the rest of the
 current Julia session.
 
-## JLArrays opt-in
+## CPU backends
 
-JLArrays is disabled by default. Enable it explicitly when a CPU-side GPU mock
-is needed (e.g., in pure CI environments without real GPU hardware):
+Two backends can run on the CPU: the JLArrays mock, and OpenCL when its device
+is a CPU, as with the PoCL runtime. They are useful in CI without GPU hardware,
+but not for benchmarks. `include_cpu_backends` controls both: with
+`include_cpu_backends = false`, JLArrays is left out and OpenCL counts as
+functional only on a non-CPU device.
 
 ```julia
-GPUEnv.activate(; include_jlarrays = true)
+GPUEnv.activate(; include_cpu_backends = false)  # GPU backends only
 ```
+
+`include_cpu_backends` replaces the `include_jlarrays` keyword of GPUEnv 0.2.
 
 ## Persistent environments
 

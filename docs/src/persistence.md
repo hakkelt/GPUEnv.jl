@@ -79,8 +79,10 @@ but no GPU passed through) is removed from the overlay, and GPUEnv warns:
 
 The persisted overlay records the failure in its state file, together with the
 Julia version and the latest release of the backend package in the local
-registry copy. When the overlay is reused, a backend missing from its
-`Project.toml` is retried only when one of those has changed since it failed,
+registry copy. While such a failure is recorded, reusing the overlay updates the
+registries at most once every 6 hours, so new releases show up. When the overlay
+is reused, a backend missing from its `Project.toml` is retried only when one of
+those has changed since it failed,
 so a backend that can never work here does not cost a package add, load and
 removal on every run. A changed source project rebuilds the overlay, which
 retries every backend. To retry anyway, for example after fixing the driver,

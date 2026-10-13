@@ -9,7 +9,7 @@ using TestItems
         ;
         path = root,
         dry_run = true,
-        include_jlarrays = false,
+        include_cpu_backends = false,
         probe = _ -> false,
     )
     io = IOBuffer()
@@ -158,6 +158,23 @@ end
     @test isempty(failures)
 end
 
+@testitem "_refresh_registries updates at most every 6 hours" begin
+    using GPUEnv
+    using Test
+
+    updates = Ref(0)
+    update = () -> (updates[] += 1)
+    hour = 60 * 60.0
+    @test GPUEnv._refresh_registries(0.0, devnull; now = 10hour, update) == 10hour
+    @test updates[] == 1
+    @test GPUEnv._refresh_registries(10hour, devnull; now = 15hour, update) == 10hour
+    @test updates[] == 1
+    @test GPUEnv._refresh_registries(10hour, devnull; now = 17hour, update) == 17hour
+    @test updates[] == 2
+    # A failed update counts as one, so it is not attempted on every activation
+    @test GPUEnv._refresh_registries(0.0, devnull; now = 10hour, update = () -> error("offline")) == 10hour
+end
+
 @testitem "_add_backends! takes the entries out again when the add fails" begin
     using GPUEnv
     using Pkg
@@ -261,6 +278,25 @@ end
     @test !GPUEnv._backend_functional(FakeOpenCLEmpty, :OpenCL)
     @test !GPUEnv._backend_functional(FakeOpenCLCompileFail, :OpenCL)
     @test GPUEnv._backend_functional(FakeOpenCLSmokePass, :OpenCL)
+
+    # A CPU device (such as PoCL) counts only when CPU backends are allowed
+    module FakeOpenCLOnCPU
+    module cl
+        platforms() = [:platform]
+        devices(::Symbol) = [:device]
+        device() = (; device_type = :cpu)
+    end
+    end
+    module FakeOpenCLOnGPU
+    module cl
+        platforms() = [:platform]
+        devices(::Symbol) = [:device]
+        device() = (; device_type = :gpu)
+    end
+    end
+    @test GPUEnv._backend_functional(FakeOpenCLOnCPU, :OpenCL)
+    @test !GPUEnv._backend_functional(FakeOpenCLOnCPU, :OpenCL; allow_cpu = false)
+    @test GPUEnv._backend_functional(FakeOpenCLOnGPU, :OpenCL; allow_cpu = false)
 end
 
 @testitem "_write_environment! copies manifest when source exists" begin
@@ -937,7 +973,7 @@ end
                 ;
                 persist = true,
                 dry_run = true,
-                include_jlarrays = false,
+                include_cpu_backends = false,
                 probe = _ -> false,
             )
             @test result.warned_about_gitignore
@@ -968,7 +1004,7 @@ end
     result = GPUEnv.sync_test_env(
         ;
         path = root,
-        include_jlarrays = true,
+        include_cpu_backends = true,
         probe = backend -> backend === :JLArrays,
         checker = _ -> true,
     )
@@ -986,7 +1022,7 @@ end
     result = GPUEnv.sync_test_env(
         ;
         path = root,
-        include_jlarrays = true,
+        include_cpu_backends = true,
         probe = backend -> backend === :JLArrays,
         checker = _ -> false,
     )
@@ -1313,7 +1349,7 @@ end
             GPUEnv.activate(
                 ;
                 path = root,
-                include_jlarrays = false,
+                include_cpu_backends = false,
                 probe = _ -> false,
             )
             @test abspath(local_pkg) in Base.LOAD_PATH
@@ -1383,7 +1419,7 @@ end
             # lines 302-304 push the stripped package root onto Base.LOAD_PATH.
             GPUEnv.activate(
                 ;
-                include_jlarrays = false,
+                include_cpu_backends = false,
                 probe = _ -> false,
             )
             @test abspath(local_pkg) in Base.LOAD_PATH

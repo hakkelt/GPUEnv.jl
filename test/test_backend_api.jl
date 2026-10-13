@@ -5,12 +5,12 @@ using TestItems
     using Test
 
     @test collect(GPUEnv.supported_backends()) == [:JLArrays, :CUDA, :AMDGPU, :Metal, :oneAPI, :OpenCL]
-    @test collect(GPUEnv.supported_backends(; include_jlarrays = false)) == [:CUDA, :AMDGPU, :Metal, :oneAPI, :OpenCL]
+    @test collect(GPUEnv.supported_backends(; include_cpu_backends = false)) == [:CUDA, :AMDGPU, :Metal, :oneAPI, :OpenCL]
 
     specs = GPUEnv.backend_specs()
     @test [spec.name for spec in specs] == [:JLArrays, :CUDA, :AMDGPU, :Metal, :oneAPI, :OpenCL]
 
-    specs_no_jl = GPUEnv.backend_specs(; include_jlarrays = false)
+    specs_no_jl = GPUEnv.backend_specs(; include_cpu_backends = false)
     @test [spec.name for spec in specs_no_jl] == [:CUDA, :AMDGPU, :Metal, :oneAPI, :OpenCL]
 end
 
@@ -18,10 +18,10 @@ end
     using GPUEnv
     using Test
 
-    predicted = GPUEnv.predict_backends(; include_jlarrays = true, probe = backend -> backend in (:JLArrays, :CUDA))
+    predicted = GPUEnv.predict_backends(; include_cpu_backends = true, probe = backend -> backend in (:JLArrays, :CUDA))
     @test predicted == [:JLArrays, :CUDA]
 
-    predicted = GPUEnv.predict_backends(; include_jlarrays = false, probe = backend -> backend == :Metal)
+    predicted = GPUEnv.predict_backends(; include_cpu_backends = false, probe = backend -> backend == :Metal)
     @test predicted == [:Metal]
 
     resolved = GPUEnv.resolve_backends([:JLArrays, :CUDA, :AMDGPU]; checker = backend -> backend != :AMDGPU)
@@ -65,7 +65,7 @@ end
     using Test
 
     backends = gpu_backends()
-    explicit_default = gpu_backends(; backends_to_test = collect(GPUEnv.supported_backends(; include_jlarrays = false)))
+    explicit_default = gpu_backends(; backends_to_test = collect(GPUEnv.supported_backends(; include_cpu_backends = false)))
     @test backends isa Vector{GpuBackend}
     @test map(b -> b.name, backends) == map(b -> b.name, explicit_default)
     # JLArrays is available in the test environment, so it must appear
@@ -78,11 +78,11 @@ end
     @test all(b -> b isa GpuBackend, non_jl)
 end
 
-@testitem "gpu_backends include_jlarrays=false" begin
+@testitem "gpu_backends include_cpu_backends=false" begin
     using GPUEnv
     using Test
 
-    backends = gpu_backends(; include_jlarrays = false)
+    backends = gpu_backends(; include_cpu_backends = false)
     @test backends isa Vector{GpuBackend}
     @test !any(is_jlarray_backend, backends)
 end
@@ -233,7 +233,7 @@ end
     using GPUEnv
     using Test
 
-    all_predicted = GPUEnv.predict_backends(; include_jlarrays = true, probe = _ -> true)
+    all_predicted = GPUEnv.predict_backends(; include_cpu_backends = true, probe = _ -> true)
     filtered = GPUEnv._filter_backends(all_predicted, [:CUDA, :AMDGPU])
     @test :CUDA ∉ filtered
     @test :AMDGPU ∉ filtered
@@ -257,7 +257,7 @@ end
     result = GPUEnv.sync_test_env(
         ;
         path = root,
-        include_jlarrays = true,
+        include_cpu_backends = true,
         probe = _ -> true,
         exclude = [:CUDA, :AMDGPU, :Metal, :oneAPI, :OpenCL],
         dry_run = true,
@@ -335,7 +335,7 @@ end
     @test FakeWithSync.synchronized[]
 end
 
-# ── include_jlarrays auto-resolve and conflict detection ─────────────────────
+# ── include_cpu_backends auto-resolve and conflict detection ─────────────────────
 
 @testitem "gpu_backends with backends_to_test=[:JLArrays] auto-enables JLArrays" begin
     using GPUEnv, JLArrays
@@ -346,77 +346,77 @@ end
     @test any(is_jlarray_backend, backends)
 end
 
-@testitem "_validate_and_resolve_include_jlarrays: none set → default_jlarrays" begin
+@testitem "_validate_and_resolve_include_cpu_backends: none set → default_cpu_backends" begin
     using GPUEnv
     using Test
 
-    resolved, native = GPUEnv._validate_and_resolve_include_jlarrays(
-        nothing, Symbol[], Symbol[]; default_jlarrays = true,
+    resolved, native = GPUEnv._validate_and_resolve_include_cpu_backends(
+        nothing, Symbol[], Symbol[]; default_cpu_backends = true,
     )
     @test resolved == true
     @test native == Symbol[]
 
-    resolved2, _ = GPUEnv._validate_and_resolve_include_jlarrays(
-        nothing, Symbol[], Symbol[]; default_jlarrays = false,
+    resolved2, _ = GPUEnv._validate_and_resolve_include_cpu_backends(
+        nothing, Symbol[], Symbol[]; default_cpu_backends = false,
     )
     @test resolved2 == false
 end
 
-@testitem "_validate_and_resolve_include_jlarrays: :JLArrays in exclude disables it by default" begin
+@testitem "_validate_and_resolve_include_cpu_backends: :JLArrays in exclude disables it by default" begin
     using GPUEnv
     using Test
 
-    resolved, native = GPUEnv._validate_and_resolve_include_jlarrays(
-        nothing, [:CUDA], [:JLArrays]; default_jlarrays = true,
+    resolved, native = GPUEnv._validate_and_resolve_include_cpu_backends(
+        nothing, [:CUDA], [:JLArrays]; default_cpu_backends = true,
     )
     @test resolved == false
     @test native == [:CUDA]
 end
 
-@testitem "_validate_and_resolve_include_jlarrays: :JLArrays in backends_to_test → true" begin
+@testitem "_validate_and_resolve_include_cpu_backends: :JLArrays in backends_to_test → true" begin
     using GPUEnv
     using Test
 
-    resolved, native = GPUEnv._validate_and_resolve_include_jlarrays(
-        nothing, [:JLArrays, :CUDA], Symbol[]; default_jlarrays = false,
+    resolved, native = GPUEnv._validate_and_resolve_include_cpu_backends(
+        nothing, [:JLArrays, :CUDA], Symbol[]; default_cpu_backends = false,
     )
     @test resolved == true
     @test :JLArrays ∉ native
     @test :CUDA ∈ native
 end
 
-@testitem "_validate_and_resolve_include_jlarrays: false + :JLArrays in backends_to_test → error" begin
+@testitem "_validate_and_resolve_include_cpu_backends: false + :JLArrays in backends_to_test → error" begin
     using GPUEnv
     using Test
 
-    @test_throws ArgumentError GPUEnv._validate_and_resolve_include_jlarrays(
-        false, [:JLArrays], Symbol[]; default_jlarrays = false,
+    @test_throws ArgumentError GPUEnv._validate_and_resolve_include_cpu_backends(
+        false, [:JLArrays], Symbol[]; default_cpu_backends = false,
     )
 end
 
-@testitem "_validate_and_resolve_include_jlarrays: true + :JLArrays in exclude → error" begin
+@testitem "_validate_and_resolve_include_cpu_backends: true + :JLArrays in exclude → error" begin
     using GPUEnv
     using Test
 
-    @test_throws ArgumentError GPUEnv._validate_and_resolve_include_jlarrays(
-        true, Symbol[], [:JLArrays]; default_jlarrays = true,
+    @test_throws ArgumentError GPUEnv._validate_and_resolve_include_cpu_backends(
+        true, Symbol[], [:JLArrays]; default_cpu_backends = true,
     )
 end
 
-@testitem "_validate_and_resolve_include_jlarrays: :JLArrays in both → error" begin
+@testitem "_validate_and_resolve_include_cpu_backends: :JLArrays in both → error" begin
     using GPUEnv
     using Test
 
-    @test_throws ArgumentError GPUEnv._validate_and_resolve_include_jlarrays(
-        nothing, [:JLArrays], [:JLArrays]; default_jlarrays = false,
+    @test_throws ArgumentError GPUEnv._validate_and_resolve_include_cpu_backends(
+        nothing, [:JLArrays], [:JLArrays]; default_cpu_backends = false,
     )
 end
 
-@testitem "gpu_backends: include_jlarrays=false conflicts with :JLArrays backends_to_test" begin
+@testitem "gpu_backends: include_cpu_backends=false conflicts with :JLArrays backends_to_test" begin
     using GPUEnv
     using Test
 
-    @test_throws ArgumentError gpu_backends(; include_jlarrays = false, backends_to_test = [:JLArrays])
+    @test_throws ArgumentError gpu_backends(; include_cpu_backends = false, backends_to_test = [:JLArrays])
 end
 
 @testitem "report_backends prints a row per backend and checks installed ones" begin

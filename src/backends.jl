@@ -112,7 +112,7 @@ struct SyncResult
     requested_backends::Vector{Symbol}
     installed_backends::Vector{Symbol}
     functional_backends::Vector{Symbol}
-    include_jlarrays::Bool
+    include_cpu_backends::Bool
     persisted::Bool
     base_environment_kind::Symbol
     warned_about_gitignore::Bool
@@ -135,12 +135,13 @@ function Base.show(io::IO, result::SyncResult)
 end
 
 """
-    supported_backends(; include_jlarrays=true)
+    supported_backends(; include_cpu_backends=true)
 
 Return the backend symbols supported by this package.
 
 # Arguments
-- `include_jlarrays::Bool=true`: whether to include the JLArrays mock backend
+- `include_cpu_backends::Bool=true`: whether to include the JLArrays mock backend, the one backend
+  that always runs on the CPU (OpenCL may too, which only its functional check can tell)
 
 # Examples
 ```jldoctest
@@ -149,20 +150,20 @@ julia> using GPUEnv
 julia> GPUEnv.supported_backends()
 (:JLArrays, :CUDA, :AMDGPU, :Metal, :oneAPI, :OpenCL)
 
-julia> GPUEnv.supported_backends(; include_jlarrays = false)
+julia> GPUEnv.supported_backends(; include_cpu_backends = false)
 (:CUDA, :AMDGPU, :Metal, :oneAPI, :OpenCL)
 ```
 """
-supported_backends(; include_jlarrays::Bool = true) =
-    include_jlarrays ? (:JLArrays, NATIVE_BACKENDS...) : NATIVE_BACKENDS
+supported_backends(; include_cpu_backends::Bool = true) =
+    include_cpu_backends ? (:JLArrays, NATIVE_BACKENDS...) : NATIVE_BACKENDS
 
 """
-    backend_specs(; include_jlarrays=true)
+    backend_specs(; include_cpu_backends=true)
 
 Return metadata entries for supported backends.
 
 # Arguments
-- `include_jlarrays::Bool=true`: whether to include metadata for the JLArrays backend
+- `include_cpu_backends::Bool=true`: whether to include metadata for the JLArrays backend, which runs on the CPU
 
 # Examples
 ```jldoctest
@@ -178,12 +179,12 @@ julia> [spec.name for spec in GPUEnv.backend_specs()]
  :OpenCL
 ```
 """
-function backend_specs(; include_jlarrays::Bool = true)
-    return [BACKEND_SPECS[backend] for backend in supported_backends(; include_jlarrays)]
+function backend_specs(; include_cpu_backends::Bool = true)
+    return [BACKEND_SPECS[backend] for backend in supported_backends(; include_cpu_backends)]
 end
 
 """
-    predict_backends(; include_jlarrays=true, probe=default_backend_probe,
+    predict_backends(; include_cpu_backends=true, probe=default_backend_probe,
                      backends_to_test=collect(NATIVE_BACKENDS))
 
 Predict which GPU backends should be attempted on this host.
@@ -195,7 +196,7 @@ for the backend's driver library, without importing GPU packages; see
 [`default_backend_probe`](@ref).
 
 # Arguments
-- `include_jlarrays::Bool=true`: whether to include JLArrays in the prediction
+- `include_cpu_backends::Bool=true`: whether to include JLArrays, which runs on the CPU, in the prediction
 - `probe::Function=default_backend_probe`: function to determine whether each backend should be tested
 - `backends_to_test::AbstractVector{Symbol}`: which native backends to probe (default: all supported native backends)
 
@@ -203,19 +204,19 @@ for the backend's driver library, without importing GPU packages; see
 ```jldoctest
 julia> using GPUEnv
 
-julia> GPUEnv.predict_backends(; include_jlarrays = false, probe = backend -> backend == :CUDA)
+julia> GPUEnv.predict_backends(; include_cpu_backends = false, probe = backend -> backend == :CUDA)
 1-element Vector{Symbol}:
  :CUDA
 ```
 """
 function predict_backends(
         ;
-        include_jlarrays::Bool = true,
+        include_cpu_backends::Bool = true,
         probe::Function = default_backend_probe,
         backends_to_test::AbstractVector{Symbol} = collect(NATIVE_BACKENDS),
     )
     predicted = Symbol[]
-    include_jlarrays && push!(predicted, :JLArrays)
+    include_cpu_backends && push!(predicted, :JLArrays)
     hardware = probe === default_backend_probe ? detect_gpu_hardware() : nothing
     for backend in backends_to_test
         should_install = hardware === nothing ? probe(backend) : probe(backend; hardware)
@@ -281,16 +282,16 @@ function resolve_backends(backends::AbstractVector{Symbol}; checker::Function = 
     return resolved
 end
 
-# Validate the relationship between include_jlarrays, backends_to_test, and exclude.
-# Returns (resolved_include_jlarrays::Bool, native_backends::Vector{Symbol}) where
-# native_backends has :JLArrays stripped (it is handled via include_jlarrays).
-# `default_jlarrays` is the fallback when include_jlarrays is nothing and no
+# Validate the relationship between include_cpu_backends, backends_to_test, and exclude.
+# Returns (resolved_include_cpu_backends::Bool, native_backends::Vector{Symbol}) where
+# native_backends has :JLArrays stripped (it is handled via include_cpu_backends).
+# `default_cpu_backends` is the fallback when include_cpu_backends is nothing and no
 # :JLArrays appears in backends_to_test.
-function _validate_and_resolve_include_jlarrays(
-        include_jlarrays::Union{Nothing, Bool},
+function _validate_and_resolve_include_cpu_backends(
+        include_cpu_backends::Union{Nothing, Bool},
         backends_to_test::AbstractVector{Symbol},
         exclude::AbstractVector{Symbol};
-        default_jlarrays::Bool,
+        default_cpu_backends::Bool,
     )
     jl_in_backends = :JLArrays ∈ backends_to_test
     jl_in_exclude = :JLArrays ∈ exclude
@@ -304,32 +305,32 @@ function _validate_and_resolve_include_jlarrays(
         )
     end
 
-    if include_jlarrays === false && jl_in_backends
+    if include_cpu_backends === false && jl_in_backends
         throw(
             ArgumentError(
-                ":JLArrays is listed in `backends_to_test` but `include_jlarrays = false`; " *
-                    "either remove :JLArrays from `backends_to_test` or set `include_jlarrays = true`",
+                ":JLArrays is listed in `backends_to_test` but `include_cpu_backends = false`; " *
+                    "either remove :JLArrays from `backends_to_test` or set `include_cpu_backends = true`",
             )
         )
     end
 
-    if include_jlarrays === true && jl_in_exclude
+    if include_cpu_backends === true && jl_in_exclude
         throw(
             ArgumentError(
-                ":JLArrays is in `exclude` but `include_jlarrays = true`; " *
-                    "either remove :JLArrays from `exclude` or set `include_jlarrays = false`",
+                ":JLArrays is in `exclude` but `include_cpu_backends = true`; " *
+                    "either remove :JLArrays from `exclude` or set `include_cpu_backends = false`",
             )
         )
     end
 
-    resolved::Bool = if include_jlarrays !== nothing
-        include_jlarrays
+    resolved::Bool = if include_cpu_backends !== nothing
+        include_cpu_backends
     elseif jl_in_backends
         true
     elseif jl_in_exclude
         false
     else
-        default_jlarrays
+        default_cpu_backends
     end
 
     native_backends = filter(!=(:JLArrays), collect(backends_to_test))
@@ -351,7 +352,7 @@ function _validate_and_resolve_include_jlarrays(
 end
 
 """
-    gpu_backends(; include_jlarrays=nothing,
+    gpu_backends(; include_cpu_backends=nothing,
 
 Return [`GpuBackend`](@ref) instances available on the current host.
 
@@ -372,7 +373,9 @@ returns backends that transform `Float64` data like FFTW does; pass
 take `Float32`/`Float16` data only.
 
 # Arguments
-- `include_jlarrays::Union{Nothing,Bool}=nothing`: whether to include the JLArrays mock backend.
+- `include_cpu_backends::Union{Nothing,Bool}=nothing`: whether to include backends that run on
+  the CPU: the JLArrays mock backend, and OpenCL when its device is a CPU (for example the PoCL
+  runtime).
   When `nothing` (default), behaves as `true` — JLArrays is included whenever it is loaded.
   Set to `true` automatically when `:JLArrays` appears in `backends_to_test`.
   Providing an explicit value that contradicts `backends_to_test` throws an `ArgumentError`.
@@ -397,20 +400,20 @@ true
 """
 function gpu_backends(
         ;
-        include_jlarrays::Union{Nothing, Bool} = nothing,
+        include_cpu_backends::Union{Nothing, Bool} = nothing,
         backends_to_test::AbstractVector{Symbol} = collect(NATIVE_BACKENDS),
         supports_fftw::Bool = false,
         require_float64::Bool = supports_fftw,
     )
-    # gpu_backends defaults to include_jlarrays=true (historic default).
-    # _validate_and_resolve_include_jlarrays with default_jlarrays=true implements this.
-    resolved_jlarrays, native_backends = _validate_and_resolve_include_jlarrays(
-        include_jlarrays, backends_to_test, Symbol[]; default_jlarrays = true,
+    # gpu_backends defaults to include_cpu_backends=true (historic default).
+    # _validate_and_resolve_include_cpu_backends with default_cpu_backends=true implements this.
+    resolved_cpu_backends, native_backends = _validate_and_resolve_include_cpu_backends(
+        include_cpu_backends, backends_to_test, Symbol[]; default_cpu_backends = true,
     )
 
     backends = GpuBackend[]
 
-    if resolved_jlarrays && (!supports_fftw || _supports_fftw(:JLArrays, nothing))
+    if resolved_cpu_backends && (!supports_fftw || _supports_fftw(:JLArrays, nothing))
         binding = _loaded_binding(:JLArrays)
         if binding !== nothing
             push!(backends, GpuBackend(:JLArray, binding...))
@@ -419,7 +422,8 @@ function gpu_backends(
 
     # Skip the functional check of backends that cannot pass the filters anyway.
     supports_fftw && (native_backends = filter(b -> haskey(FFTW_NATIVE_BACKENDS, b), native_backends))
-    for backend in resolve_backends(collect(native_backends))
+    checker = backend -> default_backend_checker(backend; include_cpu_backends = resolved_cpu_backends)
+    for backend in resolve_backends(collect(native_backends); checker)
         binding = _loaded_binding(backend)
         binding === nothing && continue
         supports_fftw && !_supports_fftw(backend, binding[1]) && continue

@@ -10,7 +10,7 @@ using TestItems
         ;
         path = joinpath(root, "test"),
         dry_run = true,
-        include_jlarrays = false,
+        include_cpu_backends = false,
         probe = _ -> false,
     )
     data = TOML.parsefile(result.project_path)
@@ -37,7 +37,7 @@ end
             ;
             path = joinpath(root, "test"),
             dry_run = true,
-            include_jlarrays = false,
+            include_cpu_backends = false,
             probe = _ -> false,
         )
         @test result.source_project_path == joinpath(root, "test", "Project.toml")
@@ -65,7 +65,7 @@ end
         result = GPUEnv.sync_test_env(
             ;
             dry_run = true,
-            include_jlarrays = false,
+            include_cpu_backends = false,
             probe = _ -> false,
         )
 
@@ -99,7 +99,7 @@ end
             ;
             persist = true,
             environment_path = env_dir,
-            include_jlarrays = true,
+            include_cpu_backends = true,
             probe = backend -> backend == :JLArrays,
             checker = _ -> true,
         )
@@ -111,7 +111,7 @@ end
         requested = GPUEnv._filter_backends(
             GPUEnv.predict_backends(
                 ;
-                include_jlarrays = true,
+                include_cpu_backends = true,
                 probe = backend -> backend == :JLArrays,
                 backends_to_test = Symbol[],
             ),
@@ -124,7 +124,7 @@ end
             ;
             persist = true,
             environment_path = env_dir,
-            include_jlarrays = true,
+            include_cpu_backends = true,
             probe = backend -> backend == :JLArrays,
             checker = _ -> true,
         )
@@ -175,7 +175,7 @@ end
 
         result = GPUEnv._sync_active_project_env_impl(
             ;
-            include_jlarrays = true,
+            include_cpu_backends = true,
             probe = backend -> backend == :JLArrays,
             checker = _ -> true,
             backends_to_test = Symbol[],
@@ -211,7 +211,7 @@ end
         path = root,
         persist = true,
         environment_path = env_dir,
-        include_jlarrays = true,
+        include_cpu_backends = true,
         probe = backend -> backend == :JLArrays,
         checker = _ -> true,
     )
@@ -222,7 +222,7 @@ end
     requested = GPUEnv._filter_backends(
         GPUEnv.predict_backends(
             ;
-            include_jlarrays = true,
+            include_cpu_backends = true,
             probe = backend -> backend == :JLArrays,
             backends_to_test = Symbol[],
         ),
@@ -236,7 +236,7 @@ end
         path = root,
         persist = true,
         environment_path = env_dir,
-        include_jlarrays = true,
+        include_cpu_backends = true,
         probe = backend -> backend == :JLArrays,
         checker = _ -> true,
     )
@@ -261,7 +261,7 @@ end
         retry_failed,
         persist = true,
         environment_path = env_dir,
-        include_jlarrays = true,
+        include_cpu_backends = true,
         probe = backend -> backend == :JLArrays,
         checker = checker,
         warn_if_unignored = false,
@@ -319,7 +319,7 @@ end
 
     result = GPUEnv._sync_env_from_path_impl(
         root;
-        include_jlarrays = true,
+        include_cpu_backends = true,
         probe = backend -> backend == :JLArrays,
         checker = _ -> true,
         backends_to_test = Symbol[],
@@ -348,7 +348,7 @@ end
         ;
         path = joinpath(root, "test"),
         dry_run = true,
-        include_jlarrays = false,
+        include_cpu_backends = false,
         probe = _ -> false,
     )
     data = TOML.parsefile(result.project_path)
@@ -368,7 +368,7 @@ end
     result = GPUEnv.sync_test_env(
         ;
         path = joinpath(root, "test"),
-        include_jlarrays = true,
+        include_cpu_backends = true,
         probe = backend -> backend == :JLArrays,
         checker = _ -> true,
     )
@@ -385,7 +385,7 @@ end
     using Test
 
     root = make_fake_package(; with_test_project = false, with_legacy_target = true)
-    result = GPUEnv.sync_test_env(; path = root, dry_run = true, include_jlarrays = true, probe = _ -> false)
+    result = GPUEnv.sync_test_env(; path = root, dry_run = true, include_cpu_backends = true, probe = _ -> false)
     data = TOML.parsefile(result.project_path)
 
     @test result.base_environment_kind == :path_project
@@ -403,7 +403,7 @@ end
         path = joinpath(root, "test"),
         environment_path = env_dir,
         dry_run = true,
-        include_jlarrays = false,
+        include_cpu_backends = false,
         probe = _ -> false,
     )
 
@@ -423,7 +423,7 @@ end
         environment_path = env_dir,
         persist = true,
         dry_run = true,
-        include_jlarrays = false,
+        include_cpu_backends = false,
         probe = _ -> false,
     )
 
@@ -431,7 +431,7 @@ end
     @test result.persisted == true
 end
 
-@testitem "include_jlarrays auto-resolves from backends_to_test" setup = [SyncTestHelpers] begin
+@testitem "include_cpu_backends auto-resolves from backends_to_test" setup = [SyncTestHelpers] begin
     using GPUEnv
     using Test
 
@@ -446,7 +446,7 @@ end
     @test :JLArrays in result.requested_backends
 end
 
-@testitem "include_jlarrays=false conflicts with :JLArrays in backends_to_test" setup = [SyncTestHelpers] begin
+@testitem "include_cpu_backends=false conflicts with :JLArrays in backends_to_test" setup = [SyncTestHelpers] begin
     using GPUEnv
     using Test
 
@@ -454,13 +454,13 @@ end
     @test_throws ArgumentError GPUEnv.sync_test_env(
         ;
         path = root,
-        include_jlarrays = false,
+        include_cpu_backends = false,
         backends_to_test = [:JLArrays],
         dry_run = true,
     )
 end
 
-@testitem "include_jlarrays=true conflicts with :JLArrays in exclude" setup = [SyncTestHelpers] begin
+@testitem "include_cpu_backends=true conflicts with :JLArrays in exclude" setup = [SyncTestHelpers] begin
     using GPUEnv
     using Test
 
@@ -468,7 +468,7 @@ end
     @test_throws ArgumentError GPUEnv.sync_test_env(
         ;
         path = root,
-        include_jlarrays = true,
+        include_cpu_backends = true,
         exclude = [:JLArrays],
         dry_run = true,
     )
@@ -537,7 +537,7 @@ end
             ;
             path = root,
             dry_run = true,
-            include_jlarrays = false,
+            include_cpu_backends = false,
             probe = _ -> false,
         )
         @test result isa GPUEnv.SyncResult
@@ -566,7 +566,7 @@ end
 
         result = GPUEnv.activate(
             ;
-            include_jlarrays = false,
+            include_cpu_backends = false,
             probe = _ -> false,
             checker = _ -> false,
         )
@@ -603,7 +603,7 @@ end
         result = GPUEnv.activate(
             ;
             dry_run = true,
-            include_jlarrays = false,
+            include_cpu_backends = false,
             probe = _ -> false,
             checker = _ -> false,
         )
@@ -628,7 +628,7 @@ end
         result = GPUEnv.activate(
             ;
             path = root,
-            include_jlarrays = false,
+            include_cpu_backends = false,
             probe = _ -> false,
             checker = _ -> false,
         )
@@ -654,14 +654,14 @@ end
         result1 = GPUEnv.activate(
             ;
             path = root,
-            include_jlarrays = false,
+            include_cpu_backends = false,
             probe = _ -> false,
             checker = _ -> false,
         )
         result2 = GPUEnv.activate(
             ;
             path = root,
-            include_jlarrays = false,
+            include_cpu_backends = false,
             probe = _ -> false,
             checker = _ -> false,
         )
@@ -686,7 +686,7 @@ end
         result1 = GPUEnv.activate(
             ;
             path = root,
-            include_jlarrays = false,
+            include_cpu_backends = false,
             probe = _ -> false,
             checker = _ -> false,
             only_first = false,
@@ -694,7 +694,7 @@ end
         result2 = GPUEnv.activate(
             ;
             path = root,
-            include_jlarrays = false,
+            include_cpu_backends = false,
             probe = _ -> false,
             checker = _ -> false,
             only_first = true,
@@ -726,7 +726,7 @@ end
         result1 = GPUEnv.activate(
             ;
             path = root,
-            include_jlarrays = false,
+            include_cpu_backends = false,
             probe = _ -> false,
             checker = _ -> false,
         )
@@ -736,7 +736,7 @@ end
         result2 = GPUEnv.activate(
             ;
             path = root,
-            include_jlarrays = false,
+            include_cpu_backends = false,
             probe = _ -> false,
             checker = _ -> false,
         )
@@ -762,7 +762,7 @@ end
             ;
             path = root,
             dry_run = true,
-            include_jlarrays = false,
+            include_cpu_backends = false,
             probe = _ -> false,
         )
         @test dry_result.dry_run
@@ -771,7 +771,7 @@ end
         real_result = GPUEnv.activate(
             ;
             path = root,
-            include_jlarrays = false,
+            include_cpu_backends = false,
             probe = _ -> false,
             checker = _ -> false,
         )
@@ -782,7 +782,7 @@ end
             ;
             path = root,
             dry_run = true,
-            include_jlarrays = false,
+            include_cpu_backends = false,
             probe = _ -> false,
         )
         @test dry_result2.dry_run
@@ -791,7 +791,7 @@ end
         real_result2 = GPUEnv.activate(
             ;
             path = root,
-            include_jlarrays = false,
+            include_cpu_backends = false,
             probe = _ -> false,
             checker = _ -> false,
         )
@@ -823,7 +823,7 @@ end
         GPUEnv.activate(
             ;
             path = root,
-            include_jlarrays = false,
+            include_cpu_backends = false,
             probe = _ -> false,
             checker = _ -> false,
         )
@@ -853,7 +853,7 @@ end
         Pkg.activate(root)
         result1 = GPUEnv.activate(
             ;
-            include_jlarrays = false,
+            include_cpu_backends = false,
             probe = _ -> false,
             checker = _ -> false,
             only_first = false,
@@ -861,7 +861,7 @@ end
         )
         result2 = GPUEnv.activate(
             ;
-            include_jlarrays = false,
+            include_cpu_backends = false,
             probe = _ -> false,
             checker = _ -> false,
             only_first = true,
@@ -908,7 +908,7 @@ end
         result1 = GPUEnv.activate(
             ;
             path = root,
-            include_jlarrays = false,
+            include_cpu_backends = false,
             probe = _ -> false,
             checker = _ -> false,
         )
@@ -917,7 +917,7 @@ end
         result2 = GPUEnv.activate(
             ;
             path = root,
-            include_jlarrays = false,
+            include_cpu_backends = false,
             probe = _ -> false,
             checker = _ -> false,
         )
@@ -939,7 +939,7 @@ end
         result3 = GPUEnv.activate(
             ;
             path = root,
-            include_jlarrays = false,
+            include_cpu_backends = false,
             probe = _ -> false,
             checker = _ -> false,
         )
@@ -1012,7 +1012,7 @@ end
         GPUEnv.activate(
             ;
             path = root,
-            include_jlarrays = false,
+            include_cpu_backends = false,
             probe = _ -> false,
             checker = _ -> false,
         )
