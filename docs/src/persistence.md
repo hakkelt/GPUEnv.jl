@@ -74,12 +74,12 @@ functional check (for example CUDA in a container that has the NVIDIA driver mou
 but no GPU passed through) is removed from the overlay, and GPUEnv warns:
 
 ```
-┌ Warning: Backend CUDA was installed but failed its functional check; it is dropped. A persisted environment retries it once the Julia version or the latest registered release changes, or with `retry_failed = true`. Run with JULIA_DEBUG=GPUEnv to see the error.
+┌ Warning: Backend CUDA was installed but failed its functional check; it is dropped. A persisted environment retries it once the Julia version, the GPUEnv version or the latest registered release changes, or with `retry_failed = true`. Run with JULIA_DEBUG=GPUEnv to see the error.
 ```
 
 The persisted overlay records the failure in its state file, together with the
-Julia version and the latest release of the backend package in the local
-registry copy. While such a failure is recorded, reusing the overlay updates the
+Julia version, the GPUEnv version and the latest release of the backend package
+in the local registry copy. While such a failure is recorded, reusing the overlay updates the
 registries at most once every 6 hours, so new releases show up. When the overlay
 is reused, a backend missing from its `Project.toml` is retried only when one of
 those has changed since it failed,

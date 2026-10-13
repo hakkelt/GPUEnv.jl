@@ -113,8 +113,8 @@ packages.
 # Arguments
 - `path::Union{Nothing, AbstractString}=nothing`: path to a directory containing `Project.toml`; defaults to active project
 - `include_cpu_backends::Union{Nothing,Bool}=nothing`: whether to include backends that run on
-  the CPU: the JLArrays mock backend, and OpenCL when its device is a CPU (for example the PoCL
-  runtime). When false, OpenCL counts as functional only on a non-CPU device.
+  the CPU: the JLArrays mock backend, and OpenCL when its only working device is a CPU (for
+  example the PoCL runtime). When false, OpenCL counts as functional only on a non-CPU device.
   When `nothing` (default), set to `true` automatically if `:JLArrays` appears in `backends_to_test`,
     otherwise `false`. Providing an explicit value that contradicts a custom `backends_to_test`
     or `exclude` throws an `ArgumentError`.
@@ -222,8 +222,8 @@ All keyword arguments are forwarded to [`sync_test_env`](@ref), but unlike
 # Arguments
 - `path::Union{Nothing, AbstractString}=nothing`: path to a directory containing `Project.toml`; defaults to active project
 - `include_cpu_backends::Union{Nothing,Bool}=nothing`: whether to include backends that run on
-  the CPU: the JLArrays mock backend, and OpenCL when its device is a CPU (for example the PoCL
-  runtime). When false, OpenCL counts as functional only on a non-CPU device.
+  the CPU: the JLArrays mock backend, and OpenCL when its only working device is a CPU (for
+  example the PoCL runtime). When false, OpenCL counts as functional only on a non-CPU device.
   When `nothing` (default), set to `true` automatically if `:JLArrays` appears in `backends_to_test`,
     otherwise `false`. Providing an explicit value that contradicts a custom `backends_to_test`
     or `exclude` throws an `ArgumentError`.
@@ -725,9 +725,9 @@ end
 # silently missing backend makes GPU test suites pass vacuously.
 function _warn_dropped_backend(backend::Symbol)
     @warn "Backend $(backend) was installed but failed its functional check; it is " *
-        "dropped. A persisted environment retries it once the Julia version or the " *
-        "latest registered release changes, or with `retry_failed = true`. Run with " *
-        "JULIA_DEBUG=GPUEnv to see the error." backend
+        "dropped. A persisted environment retries it once the Julia version, the GPUEnv " *
+        "version or the latest registered release changes, or with `retry_failed = true`. " *
+        "Run with JULIA_DEBUG=GPUEnv to see the error." backend
     return nothing
 end
 
@@ -782,6 +782,7 @@ end
 # outcome: the Julia version and the latest registered release of the package.
 _failure_record(backend::Symbol) = Dict{String, Any}(
     "julia" => string(VERSION),
+    "gpuenv" => string(pkgversion(@__MODULE__)),
     "latest_release" => string(something(_latest_registered_version(backend), "")),
 )
 
@@ -1164,46 +1165,70 @@ function _backend_functional(module_ref::Module, backend::Symbol; allow_cpu::Boo
     return Base.invokelatest(getfield(module_ref, :functional))
 end
 
-# `allow_cpu = false` rejects a CPU device, such as the PoCL runtime, which runs
-# kernels fine but is not a GPU.
+# The OpenCL module and device the last functional check chose. OpenCL.jl keeps
+# the current device per task, so GPUEnv selects it again in every task that
+# reaches OpenCL through GPUEnv (see `_select_opencl_device!`).
+const _OPENCL_DEVICE = Ref{Any}(nothing)
+
+# OpenCL is functional when one of its devices runs a small kernel. GPU devices
+# are tried first, then accelerators and other non-CPU devices, and CPU devices
+# (such as the PoCL or Intel CPU runtimes) last, and only when `allow_cpu`. The
+# first device that works becomes the current device of the calling task.
 function _opencl_backend_functional(module_ref::Module; allow_cpu::Bool = true)
     isdefined(module_ref, :cl) || return false
     cl = getfield(module_ref, :cl)
-    isdefined(cl, :platforms) || return false
+    all(name -> isdefined(cl, name), (:platforms, :devices, :device!)) || return false
 
-    platforms = Base.invokelatest(getfield(cl, :platforms))
-    isempty(platforms) && return false
-    if !allow_cpu
-        device = Base.invokelatest(getfield(cl, :device))
-        if device.device_type === :cpu
-            @debug "OpenCL runs on a CPU device" device
-            return false
-        end
-    end
-    isdefined(cl, :devices) || return true
-
-    devices = getfield(cl, :devices)
-    for platform in platforms
-        isempty(Base.invokelatest(devices, platform)) && continue
-
+    select! = getfield(cl, :device!)
+    for device in _opencl_candidates(cl; allow_cpu)
         # Some OpenCL stacks enumerate devices but fail the first kernel compile
         # (for example due to missing SPIR-V support). Treat those as non-functional.
         try
-            sample = if isdefined(module_ref, :zeros)
-                Base.invokelatest(getfield(module_ref, :zeros), Float32, 1)
-            elseif isdefined(module_ref, :CLArray)
-                Base.invokelatest(getfield(module_ref, :CLArray), Float32[1.0f0])
-            else
-                return false
-            end
-            Base.invokelatest(broadcast, +, sample, sample)
-            return true
+            Base.invokelatest(select!, () -> _opencl_smoke_test(module_ref), device) || continue
         catch err
-            @debug "OpenCL smoke test failed" exception = (err, catch_backtrace())
+            @debug "OpenCL smoke test failed" device exception = (err, catch_backtrace())
+            continue
         end
+        _OPENCL_DEVICE[] = (module_ref, device)
+        Base.invokelatest(select!, device)
+        return true
     end
-
     return false
+end
+
+function _opencl_candidates(cl::Module; allow_cpu::Bool)
+    # Properties go through `invokelatest`: OpenCL may have been loaded after
+    # the caller started, and its `getproperty` methods are newer than that.
+    property(device, name) = Base.invokelatest(getproperty, device, name)
+    devices = Any[]
+    for platform in Base.invokelatest(getfield(cl, :platforms))
+        append!(devices, Base.invokelatest(getfield(cl, :devices), platform))
+    end
+    filter!(device -> property(device, :available), devices)
+    rank(device) = get((gpu = 0, cpu = 2), property(device, :device_type), 1)
+    allow_cpu || filter!(device -> rank(device) < 2, devices)
+    return sort!(devices; by = rank)
+end
+
+function _opencl_smoke_test(module_ref::Module)
+    sample = if isdefined(module_ref, :zeros)
+        Base.invokelatest(getfield(module_ref, :zeros), Float32, 1)
+    elseif isdefined(module_ref, :CLArray)
+        Base.invokelatest(getfield(module_ref, :CLArray), Float32[1.0f0])
+    else
+        return false
+    end
+    Base.invokelatest(broadcast, +, sample, sample)
+    return true
+end
+
+# Make the device the functional check chose current in the calling task.
+function _select_opencl_device!(module_ref::Module)
+    chosen = _OPENCL_DEVICE[]
+    (chosen === nothing || first(chosen) !== module_ref) && return nothing
+    cl = getfield(module_ref, :cl)
+    Base.invokelatest(getfield(cl, :device!), last(chosen))
+    return nothing
 end
 
 function _backend_module(backend::Symbol)

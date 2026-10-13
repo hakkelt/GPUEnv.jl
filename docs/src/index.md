@@ -240,11 +240,19 @@ current Julia session.
 
 ## CPU backends
 
-Two backends can run on the CPU: the JLArrays mock, and OpenCL when its device
-is a CPU, as with the PoCL runtime. They are useful in CI without GPU hardware,
-but not for benchmarks. `include_cpu_backends` controls both: with
+Two backends can run on the CPU: the JLArrays mock, and OpenCL when its only
+working device is a CPU, as with the PoCL runtime. They are useful in CI without
+GPU hardware, but not for benchmarks. `include_cpu_backends` controls both: with
 `include_cpu_backends = false`, JLArrays is left out and OpenCL counts as
 functional only on a non-CPU device.
+
+OpenCL can offer several devices, for example a CPU runtime next to a GPU
+driver. GPUEnv tries GPU devices first, then other non-CPU devices, and CPU
+devices last (only when CPU backends are allowed), and makes the first device
+that runs a test kernel the current OpenCL device. OpenCL.jl keeps the current
+device per task: GPUEnv selects it again whenever its own functions (`to_gpu`,
+`gpu_zeros`, `synchronize_backend`, ...) reach OpenCL, but code that calls
+OpenCL directly in a newly spawned task should select it with `cl.device!`.
 
 ```julia
 GPUEnv.activate(; include_cpu_backends = false)  # GPU backends only

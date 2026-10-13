@@ -199,11 +199,14 @@ GPUSelect.jl's `find_gpu_pkgid` and `test_backends` (MIT License, Copyright (c)
 ## Upgrading from 0.2
 
 - `include_jlarrays` is now `include_cpu_backends` (also the `SyncResult`
-  field). Setting it to `false` also drops OpenCL when its device is a CPU.
+  field). Setting it to `false` also drops OpenCL when it has no working
+  non-CPU device. OpenCL now prefers a GPU device over a CPU device whatever
+  the setting.
 - `gpu_backends(; supports_fftw = true)` keeps returning only backends that
   transform `Float64` data; Metal needs `require_float64 = false`.
-- A persisted overlay retries a failed backend only when the Julia version or
-  the backend's latest release changes; pass `retry_failed = true` to force it.
+- A persisted overlay retries a failed backend only when the Julia version, the
+  GPUEnv version or the backend's latest release changes; pass
+  `retry_failed = true` to force it.
 
 ## API summary
 

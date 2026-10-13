@@ -232,71 +232,90 @@ end
     @test GPUEnv.default_backend_probe(:AMDGPU; hardware, fallback = backend -> backend === :AMDGPU)
 end
 
-@testitem "_backend_functional handles OpenCL platform queries" begin
+@testitem "_backend_functional picks an OpenCL device, preferring GPUs" begin
     using GPUEnv
     using Test
 
-    module FakeOpenCLGood
-    module cl
-        platforms() = [:platform]
-        devices(::Symbol) = [:device]
-    end
-    end
-
-    module FakeOpenCLEmpty
-    module cl
-        platforms() = Symbol[]
-        devices(::Symbol) = Symbol[]
-    end
-    end
-
-    module FakeOpenCLCompileFail
+    # A fake OpenCL.jl: `cl.PLATFORMS` lists the devices of each platform, and a
+    # kernel compile fails on the devices named in `cl.BROKEN`.
+    module FakeOpenCL
     struct FakeArray
         data::Vector{Float32}
     end
     module cl
-        platforms() = [:platform]
-        devices(::Symbol) = [:device]
+        const PLATFORMS = Ref{Vector{Vector{Any}}}([])
+        const BROKEN = Set{String}()
+        const CURRENT = Ref{Any}(nothing)
+        platforms() = collect(eachindex(PLATFORMS[]))
+        devices(platform::Int) = PLATFORMS[][platform]
+        device() = CURRENT[]
+        device!(device) = (CURRENT[] = device)
+        function device!(f::Function, device)
+            old = CURRENT[]
+            CURRENT[] = device
+            try
+                return f()
+            finally
+                CURRENT[] = old
+            end
+        end
     end
-    zeros(::Type{Float32}, ::Int) = FakeArray([1.0f0])
-    Base.broadcast(::typeof(+), ::FakeArray, ::FakeArray) = error("SPIR-V unavailable")
+    function zeros(::Type{Float32}, n::Int)
+        cl.CURRENT[].name in cl.BROKEN && error("SPIR-V unavailable")
+        return FakeArray(Base.zeros(Float32, n))
     end
-
-    module FakeOpenCLSmokePass
-    struct FakeArray
-        data::Vector{Float32}
-    end
-    module cl
-        platforms() = [:platform]
-        devices(::Symbol) = [:device]
-    end
-    zeros(::Type{Float32}, ::Int) = FakeArray([1.0f0])
     Base.broadcast(::typeof(+), a::FakeArray, b::FakeArray) = FakeArray(a.data .+ b.data)
     end
 
-    @test GPUEnv._backend_functional(FakeOpenCLGood, :OpenCL)
-    @test !GPUEnv._backend_functional(FakeOpenCLEmpty, :OpenCL)
-    @test !GPUEnv._backend_functional(FakeOpenCLCompileFail, :OpenCL)
-    @test GPUEnv._backend_functional(FakeOpenCLSmokePass, :OpenCL)
+    cl = FakeOpenCL.cl
+    device(name, device_type; available = true) = (; name, device_type, available)
+    cpu = device("cpu", :cpu)
+    gpu = device("gpu", :gpu)
+    accelerator = device("fpga", :accelerator)
 
-    # A CPU device (such as PoCL) counts only when CPU backends are allowed
-    module FakeOpenCLOnCPU
+    # The device chosen by the check, or `nothing` when OpenCL is not functional.
+    function chosen(platforms; allow_cpu, broken = String[])
+        cl.PLATFORMS[] = platforms
+        empty!(cl.BROKEN)
+        union!(cl.BROKEN, broken)
+        cl.CURRENT[] = nothing
+        GPUEnv._backend_functional(FakeOpenCL, :OpenCL; allow_cpu) || return nothing
+        return cl.device()
+    end
+
+    for allow_cpu in (true, false)
+        # A GPU wins over a CPU, on separate platforms or on the same one
+        @test chosen([[cpu], [gpu]]; allow_cpu) == gpu
+        @test chosen([[cpu, gpu]]; allow_cpu) == gpu
+        @test chosen([[cpu, accelerator]]; allow_cpu) == accelerator
+        @test chosen([[accelerator], [gpu]]; allow_cpu) == gpu
+        @test chosen(Vector{Any}[]; allow_cpu) === nothing
+        @test chosen([Any[]]; allow_cpu) === nothing
+    end
+
+    # A CPU device counts only when CPU backends are allowed
+    @test chosen([[cpu]]; allow_cpu = true) == cpu
+    @test chosen([[cpu]]; allow_cpu = false) === nothing
+
+    # A device that fails the kernel compile, or is unavailable, is skipped
+    @test chosen([[cpu, gpu]]; allow_cpu = true, broken = ["gpu"]) == cpu
+    @test chosen([[cpu, gpu]]; allow_cpu = false, broken = ["gpu"]) === nothing
+    @test chosen([[device("gpu", :gpu; available = false), cpu]]; allow_cpu = true) == cpu
+
+    # GPUEnv's own OpenCL paths select the chosen device again
+    @test chosen([[cpu, gpu]]; allow_cpu = true) == gpu
+    cl.CURRENT[] = cpu
+    backend = GPUEnv.GpuBackend(:OpenCL, FakeOpenCL, FakeOpenCL.FakeArray)
+    gpu_zeros(backend, Float32, 2)
+    @test cl.device() == gpu
+
+    # A module without OpenCL's device API is not functional
+    module NotOpenCL
     module cl
-        platforms() = [:platform]
-        devices(::Symbol) = [:device]
-        device() = (; device_type = :cpu)
+        platforms() = [1]
     end
     end
-    module FakeOpenCLOnGPU
-    module cl
-        platforms() = [:platform]
-        devices(::Symbol) = [:device]
-        device() = (; device_type = :gpu)
-    end
-    end
-    @test GPUEnv._backend_functional(FakeOpenCLOnCPU, :OpenCL)
-    @test !GPUEnv._backend_functional(FakeOpenCLOnCPU, :OpenCL; allow_cpu = false)
-    @test GPUEnv._backend_functional(FakeOpenCLOnGPU, :OpenCL; allow_cpu = false)
+    @test !GPUEnv._backend_functional(NotOpenCL, :OpenCL)
 end
 
 @testitem "_write_environment! copies manifest when source exists" begin

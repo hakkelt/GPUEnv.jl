@@ -73,6 +73,7 @@ no-op, so this function is safe to call unconditionally in device-agnostic code.
 function synchronize_backend(backend::GpuBackend)
     is_jlarray_backend(backend) && return nothing
     if backend.name == :OpenCL
+        _select_opencl_device!(backend.module_ref)
         barrier_func = getfield(backend.module_ref, :barrier)
         fence_const = getfield(backend.module_ref, :CLK_LOCAL_MEM_FENCE)
         Base.invokelatest(barrier_func, fence_const)
@@ -101,6 +102,7 @@ function to_gpu(backend::GpuBackend, array)
         jl_fn = getfield(backend.module_ref, :jl)
         return Base.invokelatest(jl_fn, array)
     end
+    backend.name === :OpenCL && _select_opencl_device!(backend.module_ref)
     return backend.array_type(array)
 end
 
@@ -374,8 +376,8 @@ take `Float32`/`Float16` data only.
 
 # Arguments
 - `include_cpu_backends::Union{Nothing,Bool}=nothing`: whether to include backends that run on
-  the CPU: the JLArrays mock backend, and OpenCL when its device is a CPU (for example the PoCL
-  runtime).
+  the CPU: the JLArrays mock backend, and OpenCL when its only working device is a CPU (for
+  example the PoCL runtime).
   When `nothing` (default), behaves as `true` — JLArrays is included whenever it is loaded.
   Set to `true` automatically when `:JLArrays` appears in `backends_to_test`.
   Providing an explicit value that contradicts `backends_to_test` throws an `ArgumentError`.
@@ -481,8 +483,10 @@ function _supports_float64(backend::Symbol, module_ref::Module)
             properties = Base.invokelatest(getfield(L0, :module_properties), device)
             return properties.fp64flags & flag == flag
         else
+            _select_opencl_device!(module_ref)
             cl = getfield(module_ref, :cl)
-            return "cl_khr_fp64" in Base.invokelatest(getfield(cl, :device)).extensions
+            device = Base.invokelatest(getfield(cl, :device))
+            return "cl_khr_fp64" in Base.invokelatest(getproperty, device, :extensions)
         end
     catch err
         @debug "Float64 support query failed" backend exception = (err, catch_backtrace())
@@ -678,6 +682,7 @@ end
 
 
 function _backend_allocate(backend::GpuBackend, method_name::Symbol, args...; fallback::Function)
+    backend.name === :OpenCL && _select_opencl_device!(backend.module_ref)
     if !is_jlarray_backend(backend) && isdefined(backend.module_ref, method_name)
         method = getfield(backend.module_ref, method_name)
         try
