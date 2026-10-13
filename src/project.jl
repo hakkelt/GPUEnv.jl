@@ -262,3 +262,10 @@ function _augment_source_project(
 
     return merged
 end
+
+function _write_toml(path::AbstractString, data::AbstractDict)
+    open(path, "w") do io
+        TOML.print(io, data)
+    end
+    return nothing
+end

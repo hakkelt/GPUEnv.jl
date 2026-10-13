@@ -399,7 +399,7 @@ function gpu_backends(
 
     backends = GpuBackend[]
 
-    if resolved_jlarrays && (!supports_fftw || VERSION >= v"1.11")
+    if resolved_jlarrays && (!supports_fftw || _supports_fftw(:JLArrays))
         binding = _loaded_binding(:JLArrays)
         if binding !== nothing
             push!(backends, GpuBackend(:JLArray, binding...))
@@ -417,9 +417,16 @@ function gpu_backends(
     return backends
 end
 
-# Whether the loaded `module_ref` of `backend` implements AbstractFFTs for its arrays.
-function _supports_fftw(backend::Symbol, module_ref::Module)
+# Whether `backend` implements AbstractFFTs for its arrays. JLArrays does from
+# Julia 1.11 on; a native backend must be loaded to know its version.
+function _supports_fftw(backend::Symbol)
     backend === :JLArrays && return VERSION >= v"1.11"
+    binding = _loaded_binding(backend)
+    return binding !== nothing && _supports_fftw(backend, binding[1])
+end
+
+# Whether the loaded `module_ref` of native `backend` implements AbstractFFTs.
+function _supports_fftw(backend::Symbol, module_ref::Module)
     min_version = get(FFTW_NATIVE_BACKENDS, backend, nothing)
     min_version === nothing && return false
     version = pkgversion(module_ref)
@@ -595,11 +602,12 @@ function detect_gpu_hardware(
     return detected
 end
 
+_pkgid(spec::BackendSpec) = Base.PkgId(Base.UUID(spec.uuid), spec.package)
+
 function _loaded_binding(backend::Symbol)
     spec = get(BACKEND_SPECS, backend, nothing)
     spec === nothing && return nothing
-    pkg_id = Base.PkgId(Base.UUID(spec.uuid), spec.package)
-    mod = get(Base.loaded_modules, pkg_id, nothing)
+    mod = get(Base.loaded_modules, _pkgid(spec), nothing)
     mod === nothing && return nothing
     isdefined(mod, spec.array_type_name) || return nothing
     return (mod, getfield(mod, spec.array_type_name))
@@ -792,14 +800,7 @@ function report_backends(
         is_installed = installed(backend)
         functional = is_installed ? checker(backend) : nothing
         ok &= functional !== false
-        fft = if functional !== true
-            nothing
-        elseif !native
-            _supports_fftw(backend, Main)
-        else
-            binding = _loaded_binding(backend)
-            binding === nothing ? nothing : _supports_fftw(backend, binding[1])
-        end
+        fft = functional === true ? _supports_fftw(backend) : nothing
         push!(rows, [String(backend), yesno(hint), yesno(driver), yesno(is_installed), yesno(functional), yesno(fft)])
     end
 
@@ -807,7 +808,7 @@ function report_backends(
     widths = [maximum(length(row[i]) for row in vcat([header], rows)) for i in eachindex(header)]
     line(row) = rstrip("  " * join(rpad.(row, widths), "  "))
     bar = "─"^max(60, length(line(header)))
-    os_name = Sys.iswindows() ? "Windows" : Sys.isapple() ? "macOS" : Sys.islinux() ? "Linux" : string(Sys.KERNEL)
+    os_name = get(Dict(:linux => "Linux", :windows => "Windows", :macos => "macOS"), _host_os(), string(Sys.KERNEL))
     project = Base.active_project()
 
     println(io, bar)
@@ -825,6 +826,5 @@ end
 function _backend_installed(backend::Symbol)
     spec = get(BACKEND_SPECS, backend, nothing)
     spec === nothing && return false
-    pkg_id = Base.identify_package(spec.package)
-    return pkg_id !== nothing && pkg_id.uuid == Base.UUID(spec.uuid)
+    return Base.identify_package(spec.package) == _pkgid(spec)
 end
