@@ -26,8 +26,11 @@ This repository contains the GPUEnv Julia package.
   (`sync_test_env`, `activate`, `_write_environment!`, etc.).
 - `test/` uses TestItems and TestItemRunner.
 - `docs/` contains the user-facing explanation and API reference.
-- `.github/workflows/CI.yml` uses the TestItems reusable workflow for linting,
-  tests, coverage reporting, and documentation deployment.
+- `.github/workflows/CI.yml` runs the tests on Julia LTS and release and reports
+  coverage; `documentation.yml` builds and deploys the docs; `TagBot.yml` creates
+  GitHub releases for registered versions.
+- `.github/dependabot.yml` keeps GitHub Actions and the `[compat]` entries of the
+  package, `docs/` and `test/` projects up to date (it replaces CompatHelper).
 
 ## Validation
 
