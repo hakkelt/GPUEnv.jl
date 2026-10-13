@@ -21,10 +21,15 @@ const BACKEND_SPECS = Dict(
 
 const NATIVE_BACKENDS = (:CUDA, :AMDGPU, :Metal, :oneAPI, :OpenCL)
 
-# Native backends that provide a FFTW-compatible FFT library.
-# Metal, oneAPI, and OpenCL are excluded because they do not expose a
-# FFTW-compatible FFT path.
-const FFTW_NATIVE_BACKENDS = (:CUDA, :AMDGPU)
+# Native backends that implement the AbstractFFTs interface (`plan_fft` etc.)
+# for their array type, mapped to the first package version that does so.
+# Metal gained it in v1.10 (MPSGraph, Float32/Float16 only); oneAPI and OpenCL
+# do not provide it.
+const FFTW_NATIVE_BACKENDS = Dict(
+    :CUDA => v"0",
+    :AMDGPU => v"0",
+    :Metal => v"1.10",
+)
 
 """A resolved GPU test backend with its loaded module and primary array type.
 
@@ -352,9 +357,10 @@ Return [`GpuBackend`](@ref) instances available on the current host.
 all native backends supported by GPUEnv). Pass an explicit list such as
 `[:CUDA, :AMDGPU]` if you want to narrow the query set. Set
 `supports_fftw = true` to include only backends that support FFTW-based
-operators: JLArrays requires Julia 1.11+ for FFTW compatibility, and Metal /
-oneAPI / OpenCL are always excluded because they do not provide a
-FFTW-compatible FFT backend.
+operators, that is, backends implementing the AbstractFFTs interface for their
+array type: JLArrays requires Julia 1.11+, Metal requires Metal.jl 1.10+ (and
+transforms only `Float32`/`Float16` data, real or complex), and oneAPI / OpenCL
+are always excluded because they do not provide an FFT backend.
 
 # Arguments
 - `include_jlarrays::Union{Nothing,Bool}=nothing`: whether to include the JLArrays mock backend.
@@ -400,13 +406,24 @@ function gpu_backends(
         end
     end
 
-    fftw_native = supports_fftw ? filter(b -> b in FFTW_NATIVE_BACKENDS, native_backends) : native_backends
+    fftw_native = supports_fftw ? filter(b -> haskey(FFTW_NATIVE_BACKENDS, b), native_backends) : native_backends
     for backend in resolve_backends(collect(fftw_native))
         binding = _loaded_binding(backend)
-        binding !== nothing && push!(backends, GpuBackend(nameof(binding[1]), binding...))
+        binding === nothing && continue
+        supports_fftw && !_supports_fftw(backend, binding[1]) && continue
+        push!(backends, GpuBackend(nameof(binding[1]), binding...))
     end
 
     return backends
+end
+
+# Whether the loaded `module_ref` of `backend` implements AbstractFFTs for its arrays.
+function _supports_fftw(backend::Symbol, module_ref::Module)
+    backend === :JLArrays && return VERSION >= v"1.11"
+    min_version = get(FFTW_NATIVE_BACKENDS, backend, nothing)
+    min_version === nothing && return false
+    version = pkgversion(module_ref)
+    return version === nothing || version >= min_version
 end
 
 """
@@ -524,13 +541,14 @@ gpu_wrapper(backend::GpuBackend, ::Type{T}, dims...) where {T} =
 
 """
     default_backend_probe(backend; hardware=detect_gpu_hardware(),
-                          fallback=_fallback_backend_probe) -> Bool
+                          fallback=_driver_library_probe) -> Bool
 
 Return whether `backend` is likely available on the current host.
 
-This first checks direct host-level hardware hints and falls back to the older
-command-based heuristics when direct detection is inconclusive. It does not
-import any GPU packages.
+This first checks direct host-level hardware hints and, when they are
+inconclusive, looks for the backend's driver library (for example `libcuda`,
+`libamdhip64` or `libze_loader`). It does not import any GPU packages and does
+not need vendor command-line tools such as `nvidia-smi`.
 
 # Arguments
 - `backend::Symbol`: the backend name to check (`:CUDA`, `:AMDGPU`, etc.)
@@ -540,7 +558,7 @@ import any GPU packages.
 function default_backend_probe(
         backend::Symbol;
         hardware::AbstractDict{Symbol, Bool} = detect_gpu_hardware(),
-        fallback::Function = _fallback_backend_probe,
+        fallback::Function = _driver_library_probe,
     )
     backend === :JLArrays && return true
     haskey(BACKEND_SPECS, backend) || return false
@@ -551,30 +569,27 @@ end
 
 """Return direct host-level hints for native GPU backends.
 
-This prefers cheap hardware and OS runtime signals such as `/dev` nodes,
-sysfs PCI vendor IDs, Windows video-controller names, and macOS display
-information. It intentionally avoids importing GPU packages.
+This uses cheap hardware signals: `/dev` nodes and sysfs PCI vendor IDs on
+Linux, the CPU architecture on macOS (Metal.jl supports Apple silicon only),
+and OpenCL ICD paths. Windows has no such hints; there the driver-library
+fallback of `default_backend_probe` decides. It intentionally avoids
+importing GPU packages.
 """
 function detect_gpu_hardware(
         ;
         os::Symbol = _host_os(),
+        arch::Symbol = Sys.ARCH,
         ispath::Function = ispath,
         read_text::Function = _read_text,
         linux_vendor_paths::Union{Nothing, AbstractVector{<:AbstractString}} = nothing,
-        windows_video_output::Union{Nothing, AbstractString} = nothing,
-        macos_display_output::Union{Nothing, AbstractString} = nothing,
     )
     detected = Dict(backend => false for backend in NATIVE_BACKENDS)
 
     if os === :linux
         vendor_paths = linux_vendor_paths === nothing ? _linux_vendor_paths() : collect(String.(linux_vendor_paths))
         _detect_linux_gpu_hardware!(detected; ispath, read_text, vendor_paths)
-    elseif os === :windows
-        video_output = windows_video_output === nothing ? _windows_video_output() : windows_video_output
-        _detect_windows_gpu_hardware!(detected; video_output)
     elseif os === :macos
-        display_output = macos_display_output === nothing ? _macos_display_output() : macos_display_output
-        _detect_macos_gpu_hardware!(detected; ispath, display_output)
+        _detect_macos_gpu_hardware!(detected; ispath, arch)
     end
 
     return detected
@@ -620,6 +635,23 @@ const OPENCL_MACOS_HINT_PATHS = (
     "/System/Library/Frameworks/OpenCL.framework/Versions/Current/OpenCL",
 )
 
+# Driver libraries each backend loads at runtime, as `(unix names, windows names)`.
+# Finding one means the vendor driver is installed, without running any vendor
+# tool. OpenCL uses the ICD loader. Metal is absent because the macOS
+# architecture check is conclusive.
+#
+# The driver-library probing (this table and `_driver_library_probe`), the Apple
+# silicon check for Metal and `report_backends` are adapted from GPUSelect.jl
+# (`find_gpu_pkgid` and `test_backends`), https://github.com/SimonDanisch/GPUSelect.jl,
+# Copyright (c) 2026 Simon Danisch, ReynKo, and contributors, MIT License.
+# See THIRD_PARTY_NOTICES.md for the full notice.
+const BACKEND_DRIVER_LIBRARIES = Dict(
+    :CUDA => (["libcuda", "libcuda.so.1"], ["nvcuda"]),
+    :AMDGPU => (["libamdhip64", "libhip_hcc"], ["amdhip64", "amdhip64_6", "amdhip64_7"]),
+    :oneAPI => (["libze_loader", "libze_loader.so.1"], ["ze_loader"]),
+    :OpenCL => (["libOpenCL", "libOpenCL.so.1"], ["OpenCL"]),
+)
+
 _read_text(path::AbstractString) = read(path, String)
 
 function _host_os()
@@ -663,27 +695,6 @@ function _linux_vendor_ids(vendor_paths::AbstractVector{<:AbstractString}; read_
     return unique(vendor_ids)
 end
 
-function _windows_video_output()
-    try
-        return read(
-            `powershell -NoProfile -Command "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name"`,
-            String,
-        )
-    catch err
-        @debug "Windows GPU discovery failed" exception = (err, catch_backtrace())
-        return nothing
-    end
-end
-
-function _macos_display_output()
-    try
-        return read(`system_profiler SPDisplaysDataType`, String)
-    catch err
-        @debug "macOS GPU discovery failed" exception = (err, catch_backtrace())
-        return nothing
-    end
-end
-
 function _detect_linux_gpu_hardware!(detected::Dict{Symbol, Bool}; ispath::Function, read_text::Function, vendor_paths)
     detected[:CUDA] = ispath("/dev/nvidiactl") || ispath("/dev/nvidia0")
     detected[:AMDGPU] = ispath("/dev/kfd")
@@ -698,54 +709,122 @@ function _detect_linux_gpu_hardware!(detected::Dict{Symbol, Bool}; ispath::Funct
     return detected
 end
 
-function _detect_windows_gpu_hardware!(detected::Dict{Symbol, Bool}; video_output::Union{Nothing, AbstractString})
-    video_output === nothing && return detected
-
-    detected[:CUDA] = occursin(r"NVIDIA"i, video_output)
-    detected[:AMDGPU] = occursin(r"AMD|Radeon"i, video_output)
-    detected[:oneAPI] = occursin(r"Intel.*(Arc|Iris|UHD)"i, video_output)
-    detected[:OpenCL] = any(detected[backend] for backend in (:CUDA, :AMDGPU, :oneAPI)) || occursin(r"OpenCL"i, video_output)
-
-    return detected
-end
-
-function _detect_macos_gpu_hardware!(
-        detected::Dict{Symbol, Bool};
-        ispath::Function,
-        display_output::Union{Nothing, AbstractString},
-    )
-    if display_output !== nothing && (
-            occursin("Metal", display_output) ||
-                occursin("Apple M", display_output) ||
-                occursin("Chipset Model: Apple", display_output)
-        )
-        detected[:Metal] = true
-    end
-
+# Metal.jl supports Apple silicon only (adapted from GPUSelect.jl, see BACKEND_DRIVER_LIBRARIES).
+function _detect_macos_gpu_hardware!(detected::Dict{Symbol, Bool}; ispath::Function, arch::Symbol)
+    detected[:Metal] = arch === :aarch64
     detected[:OpenCL] = any(ispath, OPENCL_MACOS_HINT_PATHS)
     return detected
 end
 
-function _fallback_backend_probe(backend::Symbol)
-    # Sys.which iterates PATH and calls stat() on each candidate.  On Julia 1.10
-    # a broken filesystem entry in PATH (e.g. ENOTCONN on a disconnected socket
-    # mount) causes stat() to throw rather than returning nothing.  Catch any
-    # exception and treat it as "tool not found".
+# Return whether the driver library of `backend` can be found by the dynamic loader.
+# Adapted from GPUSelect.jl's `find_gpu_pkgid`, see BACKEND_DRIVER_LIBRARIES.
+function _driver_library_probe(
+        backend::Symbol;
+        os::Symbol = _host_os(),
+        find_library::Function = Libdl.find_library,
+    )
+    libraries = get(BACKEND_DRIVER_LIBRARIES, backend, nothing)
+    libraries === nothing && return false
+    names = os === :windows ? libraries[2] : libraries[1]
     try
-        if backend === :CUDA
-            return Sys.which("nvidia-smi") !== nothing
-        elseif backend === :AMDGPU
-            return Sys.which("rocminfo") !== nothing || Sys.which("rocm-smi") !== nothing
-        elseif backend === :Metal
-            return Sys.isapple()
-        elseif backend === :oneAPI
-            return Sys.which("sycl-ls") !== nothing || Sys.which("icpx") !== nothing || Sys.which("dpcpp") !== nothing
-        elseif backend === :OpenCL
-            return Sys.which("clinfo") !== nothing
-        end
-    catch
+        return !isempty(find_library(names))
+    catch err
+        @debug "Driver library lookup failed" backend exception = (err, catch_backtrace())
         return false
     end
+end
 
-    return false
+"""
+    report_backends(io::IO = stdout; backends=collect(NATIVE_BACKENDS), kwargs...) -> Bool
+
+Print what GPUEnv sees on this host and in the active environment, and return
+whether every installed backend passed its functional check.
+
+For JLArrays and each native backend the report shows:
+
+- **hardware**: a direct host hint from `GPUEnv.detect_gpu_hardware`
+  (device nodes, PCI vendor IDs, Apple silicon),
+- **driver**: whether the backend's driver library (such as `libcuda`) is found,
+- **installed**: whether the backend package can be loaded from the active
+  environment (the load path),
+- **functional**: the result of the functional check, run only for installed
+  backends, which loads the package,
+- **FFT**: whether the backend implements AbstractFFTs, as filtered by
+  `gpu_backends(; supports_fftw = true)`.
+
+A backend is predicted by [`predict_backends`](@ref) when it has a hardware hint
+or a driver library. Nothing is installed. Call it from the REPL after
+[`activate`](@ref) to check that the environment matches the hardware.
+
+Adapted from `test_backends` of
+[GPUSelect.jl](https://github.com/SimonDanisch/GPUSelect.jl) (MIT License).
+
+# Arguments
+- `io::IO=stdout`: where to print the report
+- `backends::AbstractVector{Symbol}`: native backends to report (default: all supported)
+- `hardware::AbstractDict{Symbol, Bool}=detect_gpu_hardware()`: direct hardware hints
+- `driver_library::Function`: `backend -> Bool`, whether the driver library is found
+- `installed::Function`: `backend -> Bool`, whether the package is in the active environment
+- `checker::Function=default_backend_checker`: functional check for installed backends
+
+# Examples
+```julia
+using GPUEnv
+GPUEnv.activate()
+report_backends()
+```
+"""
+function report_backends(
+        io::IO = stdout;
+        backends::AbstractVector{Symbol} = collect(NATIVE_BACKENDS),
+        hardware::AbstractDict{Symbol, Bool} = detect_gpu_hardware(),
+        driver_library::Function = _driver_library_probe,
+        installed::Function = _backend_installed,
+        checker::Function = default_backend_checker,
+    )
+    yesno(x) = x === nothing ? "-" : x ? "yes" : "no"
+    rows = Vector{String}[]
+    ok = true
+    for backend in vcat(:JLArrays, filter(!=(:JLArrays), collect(backends)))
+        native = backend !== :JLArrays
+        hint = native ? get(hardware, backend, false) : nothing
+        driver = native ? driver_library(backend) : nothing
+        is_installed = installed(backend)
+        functional = is_installed ? checker(backend) : nothing
+        ok &= functional !== false
+        fft = if functional !== true
+            nothing
+        elseif !native
+            _supports_fftw(backend, Main)
+        else
+            binding = _loaded_binding(backend)
+            binding === nothing ? nothing : _supports_fftw(backend, binding[1])
+        end
+        push!(rows, [String(backend), yesno(hint), yesno(driver), yesno(is_installed), yesno(functional), yesno(fft)])
+    end
+
+    header = ["backend", "hardware", "driver", "installed", "functional", "FFT"]
+    widths = [maximum(length(row[i]) for row in vcat([header], rows)) for i in eachindex(header)]
+    line(row) = rstrip("  " * join(rpad.(row, widths), "  "))
+    bar = "─"^max(60, length(line(header)))
+    os_name = Sys.iswindows() ? "Windows" : Sys.isapple() ? "macOS" : Sys.islinux() ? "Linux" : string(Sys.KERNEL)
+    project = Base.active_project()
+
+    println(io, bar)
+    println(io, "  GPUEnv backend report")
+    println(io, "  ", os_name, " / ", Sys.ARCH, ", Julia ", VERSION)
+    println(io, "  Active project: ", project === nothing ? "none" : project)
+    println(io, bar)
+    println(io, line(header))
+    foreach(row -> println(io, line(row)), rows)
+    println(io, bar)
+    return ok
+end
+
+# Whether the package of `backend` resolves to its known UUID from the load path.
+function _backend_installed(backend::Symbol)
+    spec = get(BACKEND_SPECS, backend, nothing)
+    spec === nothing && return false
+    pkg_id = Base.identify_package(spec.package)
+    return pkg_id !== nothing && pkg_id.uuid == Base.UUID(spec.uuid)
 end

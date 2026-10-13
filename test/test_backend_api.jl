@@ -103,9 +103,8 @@ end
     fftw_backends = gpu_backends(; supports_fftw = true)
     @test fftw_backends isa Vector{GpuBackend}
 
-    # Metal, oneAPI, and OpenCL are excluded even when explicitly requested
+    # oneAPI and OpenCL are excluded even when explicitly requested
     all_native = gpu_backends(; backends_to_test = [:CUDA, :AMDGPU, :Metal, :oneAPI, :OpenCL], supports_fftw = true)
-    @test !any(b -> b.name === :Metal, all_native)
     @test !any(b -> b.name === :oneAPI, all_native)
     @test !any(b -> b.name === :OpenCL, all_native)
 
@@ -116,6 +115,14 @@ end
     else
         @test has_jl_fftw
     end
+
+    # Metal implements AbstractFFTs from Metal.jl 1.10 on
+    MetalStub = Module(:Metal)
+    @test !GPUEnv._supports_fftw(:oneAPI, MetalStub)
+    @test !GPUEnv._supports_fftw(:OpenCL, MetalStub)
+    @test GPUEnv._supports_fftw(:CUDA, MetalStub)
+    @test GPUEnv._supports_fftw(:Metal, MetalStub)  # no version known: trust the backend
+    @test GPUEnv.FFTW_NATIVE_BACKENDS[:Metal] == v"1.10"
 
     # Without supports_fftw, JLArrays is always included (when JLArrays is loadable)
     all_backends = gpu_backends(; supports_fftw = false)
@@ -404,4 +411,43 @@ end
     using Test
 
     @test_throws ArgumentError gpu_backends(; include_jlarrays = false, backends_to_test = [:JLArrays])
+end
+
+@testitem "report_backends prints a row per backend and checks installed ones" begin
+    using GPUEnv
+    using Test
+
+    hardware = Dict(backend => false for backend in GPUEnv.NATIVE_BACKENDS)
+    hardware[:CUDA] = true
+    checked = Symbol[]
+    checker = backend -> (push!(checked, backend); backend !== :AMDGPU)
+
+    io = IOBuffer()
+    ok = report_backends(
+        io;
+        backends = [:CUDA, :AMDGPU, :Metal],
+        hardware,
+        driver_library = backend -> backend === :AMDGPU,
+        installed = backend -> backend in (:JLArrays, :CUDA, :AMDGPU),
+        checker,
+    )
+    out = String(take!(io))
+
+    @test !ok  # AMDGPU is installed but not functional
+    @test checked == [:JLArrays, :CUDA, :AMDGPU]  # Metal is not installed, so not loaded
+    @test contains(out, "GPUEnv backend report")
+    @test occursin(r"CUDA\s+yes\s+no\s+yes\s+yes", out)
+    @test occursin(r"AMDGPU\s+no\s+yes\s+yes\s+no", out)
+    @test occursin(r"Metal\s+no\s+no\s+no\s+-\s+-", out)
+    @test occursin(Regex("JLArrays\\s+-\\s+-\\s+yes\\s+yes\\s+" * (VERSION >= v"1.11" ? "yes" : "no")), out)
+    @test !any(endswith(' '), split(out, '\n'))
+
+    @test report_backends(
+        IOBuffer();
+        backends = [:CUDA],
+        hardware,
+        driver_library = _ -> false,
+        installed = _ -> false,
+        checker = _ -> error("must not be called"),
+    )
 end

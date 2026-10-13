@@ -57,21 +57,48 @@ end
     @test !detected[:Metal]
 end
 
-@testitem "detect_gpu_hardware on Windows parses controller names" begin
+@testitem "detect_gpu_hardware on macOS keys Metal on Apple silicon" begin
     using GPUEnv
     using Test
 
-    detected = GPUEnv.detect_gpu_hardware(
-        ;
-        os = :windows,
-        windows_video_output = "NVIDIA RTX\nAMD Radeon\nIntel Arc\n",
-    )
+    apple = GPUEnv.detect_gpu_hardware(; os = :macos, arch = :aarch64, ispath = _ -> false)
+    @test apple[:Metal]
+    @test !apple[:OpenCL]
+    @test !apple[:CUDA]
 
-    @test detected[:CUDA]
-    @test detected[:AMDGPU]
-    @test detected[:oneAPI]
-    @test detected[:OpenCL]
-    @test !detected[:Metal]
+    intel = GPUEnv.detect_gpu_hardware(; os = :macos, arch = :x86_64, ispath = _ -> true)
+    @test !intel[:Metal]
+    @test intel[:OpenCL]
+
+    windows = GPUEnv.detect_gpu_hardware(; os = :windows)
+    @test !any(values(windows))
+end
+
+@testitem "_driver_library_probe looks up per-OS driver libraries" begin
+    using GPUEnv
+    using Test
+
+    queried = Vector{String}[]
+    found = Set(["libcuda", "nvcuda", "ze_loader"])
+    find_library = function (names)
+        push!(queried, names)
+        i = findfirst(in(found), names)
+        return i === nothing ? "" : names[i]
+    end
+
+    @test GPUEnv._driver_library_probe(:CUDA; os = :linux, find_library)
+    @test !GPUEnv._driver_library_probe(:AMDGPU; os = :linux, find_library)
+    @test !GPUEnv._driver_library_probe(:oneAPI; os = :linux, find_library)
+    @test GPUEnv._driver_library_probe(:oneAPI; os = :windows, find_library)
+    @test GPUEnv._driver_library_probe(:CUDA; os = :windows, find_library)
+    @test "nvcuda" in queried[end]
+
+    n = length(queried)
+    @test !GPUEnv._driver_library_probe(:Metal; os = :macos, find_library)
+    @test !GPUEnv._driver_library_probe(:JLArrays; os = :linux, find_library)
+    @test length(queried) == n
+
+    @test !GPUEnv._driver_library_probe(:CUDA; os = :linux, find_library = _ -> error("broken loader"))
 end
 
 @testitem "default_backend_probe uses direct detection before fallback" begin

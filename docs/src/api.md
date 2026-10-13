@@ -15,6 +15,7 @@ GPUEnv.SyncResult
 GPUEnv.supported_backends
 GPUEnv.backend_specs
 GPUEnv.predict_backends
+GPUEnv.report_backends
 GPUEnv.backend_modules_and_array_types
 GPUEnv.resolve_backends
 ```

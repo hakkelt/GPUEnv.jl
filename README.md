@@ -32,9 +32,17 @@ Pkg for the actual dependency resolution and installation work.
 `JLArrays`, `CUDA`, `AMDGPU`, `Metal`, `oneAPI`, `OpenCL`
 
 Backend prediction prefers direct host hints first: Linux device nodes and PCI
-vendor IDs, Windows video-controller names, and macOS display information.
-Command-line tools such as `nvidia-smi`, `rocminfo`, `sycl-ls`, and `clinfo`
-remain fallbacks.
+vendor IDs, and Apple silicon on macOS (Metal.jl does not support Intel Macs).
+When those are inconclusive, and always on Windows, it looks for the vendor
+driver library through the dynamic loader (`libcuda`/`nvcuda`, `libamdhip64`,
+`libze_loader`, `libOpenCL`), so no vendor command-line tools are needed.
+
+Backends with an AbstractFFTs implementation (`gpu_backends(; supports_fftw = true)`)
+are CUDA, AMDGPU, Metal (Metal.jl 1.10 or newer; `Float32`/`Float16` only), and
+JLArrays on Julia 1.11 or newer.
+
+Run `report_backends()` to see the hardware hints, driver libraries, installed
+packages, functional checks and FFT support for every backend on the current host.
 
 ## Use case 1: test overlays
 
@@ -145,12 +153,44 @@ If the persisted environment lives inside a Git repository, add `gpu_env/` to
 `.gitignore`. GPUEnv warns when a persisted overlay inside a repository is not
 ignored.
 
+## GPUSelect.jl as an alternative
+
+[GPUSelect.jl](https://github.com/SimonDanisch/GPUSelect.jl) solves a related
+problem, and may be the better fit when you write a script or an application
+rather than a package test suite. The two differ in what they set up:
+
+- **One backend versus all of them.** GPUSelect picks the single backend that
+  matches the hardware and returns its KernelAbstractions backend (`Backend()`)
+  or array type (`Storage()`). GPUEnv gives you every functional backend on the
+  host, plus JLArrays by default, so the same tests run on each of them.
+- **Where the backend is installed.** GPUSelect's `auto_install!()` adds the
+  backend to the active project once, and `@load_backend()` or a preference
+  picks it in later sessions. GPUEnv never edits your `Project.toml`; it builds
+  a temporary or persisted overlay environment on top of it and resolves the
+  backends there.
+- **Verification.** GPUEnv installs the predicted backends, runs each one's
+  functional check, and drops those that fail (for example CUDA on a node
+  with the driver but no GPU). GPUSelect trusts the detected driver and falls
+  back to the CPU when loading fails.
+- **Backends.** GPUSelect supports CUDA, AMDGPU, Metal, oneAPI and the Vulkan
+  backend Lava.jl, with KernelAbstractions' `CPU()` as fallback. GPUEnv supports
+  CUDA, AMDGPU, Metal, oneAPI, OpenCL and JLArrays, and can filter backends by
+  FFT support. Neither needs vendor command-line tools.
+- **Dependencies.** GPUSelect depends on KernelAbstractions, Adapt and
+  Preferences and works with KernelAbstractions backends. GPUEnv depends only on
+  standard libraries and works with array types.
+
+GPUEnv's driver-library detection and `report_backends` are adapted from
+GPUSelect.jl's `find_gpu_pkgid` and `test_backends` (MIT License, Copyright (c)
+2026 Simon Danisch, ReynKo, and contributors; see `THIRD_PARTY_NOTICES.md`).
+
 ## API summary
 
 - `activate(...)` synchronizes the overlay and leaves it active.
 - `sync_test_env(...)` performs the same synchronization work but restores the previous environment before returning.
 - `gpu_backends(...)` returns the functional backends available in the current session.
 - `predict_backends(...)` returns the backends that look worth trying on this host before installation.
+- `report_backends()` prints what GPUEnv detects on this host and in the active environment.
 - `gpu_zeros`, `gpu_ones`, `gpu_randn`, and `gpu_wrapper` provide small backend-agnostic helpers.
 
 ## AI Usage Disclaimer

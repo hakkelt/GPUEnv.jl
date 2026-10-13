@@ -70,7 +70,7 @@ new fingerprint is recorded.
 ## Backends that fail their functional check
 
 Every predicted backend is installed and then checked; one that fails its
-functional check (for example CUDA on a login node that has `nvidia-smi` but no
+functional check (for example CUDA on a login node that has the NVIDIA driver but no
 GPU) is removed from the overlay, and GPUEnv warns:
 
 ```

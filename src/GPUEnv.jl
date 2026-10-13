@@ -1,5 +1,6 @@
 module GPUEnv
 
+using Libdl
 using Pkg
 using TOML
 
@@ -19,6 +20,7 @@ export BackendSpec,
     gpu_zeros,
     is_jlarray_backend,
     predict_backends,
+    report_backends,
     resolve_backends,
     sync_test_env,
     supported_backends,
