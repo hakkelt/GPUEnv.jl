@@ -3,7 +3,7 @@ using Test
 
 GPUEnv.activate()
 
-ts = @testset "TestProject" begin
+@testset "TestProject" begin
     backends = GPUEnv.gpu_backends()
     @test !isempty(backends)
 
@@ -39,5 +39,3 @@ ts = @testset "TestProject" begin
     using JSON
     @test JSON.json(Dict("status" => "ok")) == "{\"status\":\"ok\"}"
 end
-
-ts.anynonpass && exit(1)
