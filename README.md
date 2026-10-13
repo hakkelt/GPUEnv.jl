@@ -132,7 +132,10 @@ but repeated test runs might pay the full resolve and precompile cost every time
 
 Passing `persist = true` writes the overlay to `gpu_env/` under the overlay
 root, records a compact snapshot of the source environment, and reuses the
-overlay until the source project or manifest changes.
+overlay until the source project or manifest changes. A backend that fails its
+functional check is removed from the overlay with a warning; later runs add back
+and re-check only the backends that are missing, so an overlay first built on a
+machine without a working GPU picks up the GPU once one is available.
 
 ```julia
 GPUEnv.activate(; include_jlarrays = true, persist = true)

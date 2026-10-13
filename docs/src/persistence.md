@@ -66,3 +66,27 @@ a fingerprint of the current source project's resolved dependencies and compares
 stored in the persisted environment. When the two differ — for example because
 you added or updated a dependency — the overlay is rebuilt from scratch and the
 new fingerprint is recorded.
+
+## Backends that fail their functional check
+
+Every predicted backend is installed and then checked; one that fails its
+functional check (for example CUDA on a login node that has `nvidia-smi` but no
+GPU) is removed from the overlay, and GPUEnv warns:
+
+```
+┌ Warning: Backend CUDA was installed but failed its functional check; it is dropped for now and retried on the next activation. Run with JULIA_DEBUG=GPUEnv to see the error.
+```
+
+A failure like this is often temporary, so the persisted overlay does not
+remember it. When the overlay is reused, GPUEnv compares the predicted backends
+with the ones in the overlay's `Project.toml`, adds back only the missing ones
+(with the same `[compat]` bounds a fresh overlay has) and checks them again.
+Nothing else is rebuilt. With `only_first = true` only the backends that come
+before the installed one in the preference order are retried; if one of them
+works now, it replaces the installed one.
+
+Retrying a backend that keeps failing costs a package add, load and removal on
+every run. Pass `exclude = [:CUDA]` (or the backend in question) on machines
+where it can never work.
+
+Changing `only_first` between runs rebuilds the overlay.

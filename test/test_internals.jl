@@ -253,6 +253,73 @@ end
     @test !GPUEnv._can_reuse_persisted_env(sync_state, env_dir; persisted = true)
 end
 
+@testitem "_can_reuse_persisted_env rebuilds when only_first changes" begin
+    using GPUEnv
+    using Test
+
+    project_data = Dict{String, Any}(
+        "deps" => Dict("Example" => "7876af07-990d-54b4-ab0e-23690620f79a"),
+    )
+    env_dir = mktempdir()
+    GPUEnv._write_environment!(project_data, nothing, env_dir)
+    GPUEnv._write_sync_state!(env_dir, GPUEnv._sync_state_data(project_data, nothing, [:CUDA, :OpenCL], true))
+
+    @test GPUEnv._can_reuse_persisted_env(
+        GPUEnv._sync_state_data(project_data, nothing, [:CUDA, :OpenCL], true), env_dir; persisted = true
+    )
+    @test !GPUEnv._can_reuse_persisted_env(
+        GPUEnv._sync_state_data(project_data, nothing, [:CUDA, :OpenCL], false), env_dir; persisted = true
+    )
+end
+
+@testitem "_overlay_backends reads the installed backends from the overlay deps" begin
+    using GPUEnv
+    using Test
+
+    env_dir = mktempdir()
+    project_path = joinpath(env_dir, "Project.toml")
+    write(
+        project_path, """
+        [deps]
+        Example = "7876af07-990d-54b4-ab0e-23690620f79a"
+        OpenCL = "08131aa3-fb12-5dee-8b74-c09406e224a2"
+        JLArrays = "27aeb0d3-9eb9-45fb-866b-73c2ecf80fcb"
+        """
+    )
+    # Order follows the request, and a backend without a known package is ignored.
+    @test GPUEnv._overlay_backends(project_path, [:JLArrays, :CUDA, :OpenCL, :Unknown]) == [:JLArrays, :OpenCL]
+
+    write(project_path, "name = \"Empty\"\n")
+    @test GPUEnv._overlay_backends(project_path, [:JLArrays, :CUDA]) == Symbol[]
+end
+
+@testitem "_backends_to_retry picks the backends missing from the overlay" begin
+    using GPUEnv
+    using Test
+
+    @test GPUEnv._backends_to_retry([:JLArrays, :CUDA, :OpenCL], [:JLArrays, :OpenCL], false) == [:CUDA]
+    @test GPUEnv._backends_to_retry([:JLArrays, :CUDA], [:JLArrays, :CUDA], false) == Symbol[]
+    @test GPUEnv._backends_to_retry([:CUDA, :Unknown], Symbol[], false) == [:CUDA]
+    # With only_first, only backends preferred over the installed one are missing.
+    @test GPUEnv._backends_to_retry([:CUDA, :OpenCL], [:OpenCL], true) == [:CUDA]
+    @test GPUEnv._backends_to_retry([:CUDA, :OpenCL], [:CUDA], true) == Symbol[]
+    @test GPUEnv._backends_to_retry([:CUDA, :OpenCL], Symbol[], true) == [:CUDA, :OpenCL]
+end
+
+@testitem "_drop_nonfunctional! drops consecutive failing backends" begin
+    using GPUEnv
+    using Test
+
+    removed = Symbol[]
+    installed = [:JLArrays, :CUDA, :OpenCL, :AMDGPU]
+    result = @test_logs (:warn,) (:warn,) GPUEnv._drop_nonfunctional!(
+        installed, b -> b in (:JLArrays, :AMDGPU), b -> push!(removed, b)
+    )
+    @test result === installed
+    @test installed == [:JLArrays, :AMDGPU]
+    @test removed == [:CUDA, :OpenCL]
+end
+
 @testitem "_can_reuse_persisted_env allows env-local manifest when no source manifest was tracked" begin
     using GPUEnv
     using Test
@@ -447,6 +514,29 @@ end
         installed, functional = GPUEnv._install_and_filter_backends!([:JLArrays], _ -> false, true, devnull)
         @test installed == Symbol[]
         @test functional == Symbol[]
+    finally
+        previous_project === nothing || Pkg.activate(dirname(previous_project))
+    end
+end
+
+@testitem "_install_and_filter_backends! warns when it drops a backend" begin
+    using GPUEnv
+    using Pkg
+    using Test
+
+    env_dir = mktempdir()
+    write(joinpath(env_dir, "Project.toml"), "name = \"CheckAll\"\nuuid = \"00000000-0000-0000-0000-000000000134\"\n")
+
+    previous_project = Base.active_project()
+    checked = Symbol[]
+    try
+        Pkg.activate(env_dir)
+        installed, functional = @test_logs (:warn,) match_mode = :any GPUEnv._install_and_filter_backends!(
+            [:JLArrays], b -> (push!(checked, b); false), false, devnull
+        )
+        @test installed == Symbol[]
+        @test functional == Symbol[]
+        @test checked == [:JLArrays]
     finally
         previous_project === nothing || Pkg.activate(dirname(previous_project))
     end

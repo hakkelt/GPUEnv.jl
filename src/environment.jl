@@ -121,7 +121,9 @@ packages.
 - `backends_to_test::AbstractVector{Symbol}`: which backends to attempt
 - `exclude::AbstractVector{Symbol}=Symbol[]`: backends to skip even when predicted as available
 - `only_first::Bool=false`: if true, stop after the first functional backend is installed
-- `persist::Bool=false`: whether to cache the environment in `gpu_env/` under the overlay root
+- `persist::Bool=false`: whether to cache the environment in `gpu_env/` under the overlay root.
+  A reused environment re-checks predicted backends it lacks, so a backend that failed its
+  functional check once (and was removed with a warning) is retried on the next call.
 - `environment_path::Union{Nothing, AbstractString}=nothing`: exact path of the folder to use for the
   GPU overlay environment; when provided the folder is used directly (no subdirectory is appended).
   Set `persist=true` alongside `environment_path` to enable environment reuse.
@@ -219,7 +221,9 @@ All keyword arguments are forwarded to [`sync_test_env`](@ref), but unlike
 - `backends_to_test::AbstractVector{Symbol}`: which backends to attempt
 - `exclude::AbstractVector{Symbol}=Symbol[]`: backends to skip even when predicted as available
 - `only_first::Bool=false`: if true, stop after the first functional backend is installed
-- `persist::Bool=false`: whether to cache the environment in `gpu_env/` under the overlay root
+- `persist::Bool=false`: whether to cache the environment in `gpu_env/` under the overlay root.
+  A reused environment re-checks predicted backends it lacks, so a backend that failed its
+  functional check once (and was removed with a warning) is retried on the next call.
 - `environment_path::Union{Nothing, AbstractString}=nothing`: exact path of the folder to use for the
   GPU overlay environment; when provided the folder is used directly (no subdirectory is appended).
   Set `persist=true` alongside `environment_path` to enable environment reuse.
@@ -433,7 +437,7 @@ function _sync_active_project_env_impl(
         environment_path = environment_path,
     )
 
-    sync_state = _sync_state_data(sync_project_data, source_manifest, requested)
+    sync_state = _sync_state_data(sync_project_data, source_manifest, requested, only_first)
     reusable = _can_reuse_persisted_env(sync_state, env_dir; persisted = persisted)
     project_path = reusable ? joinpath(env_dir, "Project.toml") : _write_environment!(sync_project_data, source_manifest, env_dir)
     warned = _maybe_warn_about_persisted_env(source_root, env_dir; persisted = persisted, warn_if_unignored = warn_if_unignored)
@@ -454,71 +458,24 @@ function _sync_active_project_env_impl(
         )
     end
 
-    previous_project = Base.active_project()
-    installed = Symbol[]
-    success = false
-    try
-        Pkg.activate(env_dir; io = io)
-        # Packages stripped from overlay deps (e.g., the root workspace package on
-        # Julia 1.10) are no longer in the overlay env.  Push their project dirs to
-        # LOAD_PATH so Julia can still find them via the original manifest's path entry.
-        if !isempty(stripped_paths) && !restore_previous_project
-            for pkg_path in stripped_paths
-                pkg_path in Base.LOAD_PATH || push!(Base.LOAD_PATH, pkg_path)
-            end
-        end
-
-        if reusable
-            installed = copy(requested)
-        else
-            developed = _develop_overlay_path_sources!(sync_project_data, io)
-            installed, functional = _install_and_filter_backends!(requested, checker, only_first, io)
-            sources_changed = _restore_overlay_sources!(project_path, sync_project_data)
-            if developed || sources_changed || isempty(installed)
-                Pkg.instantiate(; io = io)
-            end
-            Pkg.precompile(; io = io)
-            sync_state["project_toml"] = read(project_path, String)
-            persisted && _write_sync_state!(env_dir, sync_state)
-            restore_previous_project || _load_functional_backends!(functional)
-
-            success = true
-            return SyncResult(
-                env_dir,
-                project_path,
-                active_project,
-                requested,
-                installed,
-                functional,
-                include_jlarrays,
-                persisted,
-                :active_project,
-                warned,
-                false,
-            )
-        end
-
-        functional = resolve_backends(installed; checker = checker)
-        restore_previous_project || _load_functional_backends!(functional)
-        success = true
-        return SyncResult(
-            env_dir,
-            project_path,
-            active_project,
-            requested,
-            installed,
-            functional,
-            include_jlarrays,
-            persisted,
-            :active_project,
-            warned,
-            false,
-        )
-    finally
-        if previous_project !== nothing && (restore_previous_project || !success)
-            Pkg.activate(dirname(previous_project); io = io)
-        end
-    end
+    return _sync_overlay!(
+        env_dir,
+        project_path,
+        active_project,
+        :active_project;
+        sync_project_data = sync_project_data,
+        sync_state = sync_state,
+        requested = requested,
+        reusable = reusable,
+        persisted = persisted,
+        stripped_paths = stripped_paths,
+        checker = checker,
+        only_first = only_first,
+        include_jlarrays = include_jlarrays,
+        warned = warned,
+        io = io,
+        restore_previous_project = restore_previous_project,
+    )
 end
 
 function _sync_env_from_path_impl(
@@ -563,7 +520,7 @@ function _sync_env_from_path_impl(
         environment_path = environment_path,
     )
 
-    sync_state = _sync_state_data(sync_project_data, source_manifest, requested)
+    sync_state = _sync_state_data(sync_project_data, source_manifest, requested, only_first)
     reusable = _can_reuse_persisted_env(sync_state, env_dir; persisted = persisted)
     project_path = reusable ? joinpath(env_dir, "Project.toml") : _write_environment!(sync_project_data, source_manifest, env_dir)
     warned = _maybe_warn_about_persisted_env(root, env_dir; persisted = persisted, warn_if_unignored = warn_if_unignored)
@@ -584,11 +541,54 @@ function _sync_env_from_path_impl(
         )
     end
 
+    return _sync_overlay!(
+        env_dir,
+        project_path,
+        source_project_path,
+        :path_project;
+        sync_project_data = sync_project_data,
+        sync_state = sync_state,
+        requested = requested,
+        reusable = reusable,
+        persisted = persisted,
+        stripped_paths = stripped_paths,
+        checker = checker,
+        only_first = only_first,
+        include_jlarrays = include_jlarrays,
+        warned = warned,
+        io = io,
+        restore_previous_project = restore_previous_project,
+    )
+end
+
+# Activate the overlay at `env_dir` and bring its backends up to date: a fresh
+# overlay installs and checks every requested backend, a reused one only retries
+# the backends that are missing from it. Shared by both sync entry points.
+function _sync_overlay!(
+        env_dir::AbstractString,
+        project_path::AbstractString,
+        source_path::AbstractString,
+        source_kind::Symbol;
+        sync_project_data::Dict{String, Any},
+        sync_state::Dict{String, Any},
+        requested::AbstractVector{Symbol},
+        reusable::Bool,
+        persisted::Bool,
+        stripped_paths::AbstractVector{<:AbstractString},
+        checker::Function,
+        only_first::Bool,
+        include_jlarrays::Bool,
+        warned::Bool,
+        io::IO,
+        restore_previous_project::Bool,
+    )
     previous_project = Base.active_project()
-    installed = Symbol[]
     success = false
     try
         Pkg.activate(env_dir; io = io)
+        # Packages stripped from overlay deps (e.g., the root workspace package on
+        # Julia 1.10) are no longer in the overlay env.  Push their project dirs to
+        # LOAD_PATH so Julia can still find them via the original manifest's path entry.
         if !isempty(stripped_paths) && !restore_previous_project
             for pkg_path in stripped_paths
                 pkg_path in Base.LOAD_PATH || push!(Base.LOAD_PATH, pkg_path)
@@ -596,7 +596,8 @@ function _sync_env_from_path_impl(
         end
 
         if reusable
-            installed = copy(requested)
+            installed = _retry_missing_backends!(project_path, requested, checker, only_first, io)
+            functional = resolve_backends(installed; checker = checker)
         else
             developed = _develop_overlay_path_sources!(sync_project_data, io)
             installed, functional = _install_and_filter_backends!(requested, checker, only_first, io)
@@ -605,39 +606,24 @@ function _sync_env_from_path_impl(
                 Pkg.instantiate(; io = io)
             end
             Pkg.precompile(; io = io)
-            sync_state["project_toml"] = read(project_path, String)
-            persisted && _write_sync_state!(env_dir, sync_state)
-            restore_previous_project || _load_functional_backends!(functional)
-
-            success = true
-            return SyncResult(
-                env_dir,
-                project_path,
-                source_project_path,
-                requested,
-                installed,
-                functional,
-                include_jlarrays,
-                persisted,
-                :path_project,
-                warned,
-                false,
-            )
         end
-
-        functional = resolve_backends(installed; checker = checker)
+        # Pkg rewrites Project.toml whenever a backend is added or removed, so record
+        # the result, or the next reuse check would see a mismatch and rebuild.
+        sync_state["project_toml"] = read(project_path, String)
+        persisted && _write_sync_state!(env_dir, sync_state)
         restore_previous_project || _load_functional_backends!(functional)
+
         success = true
         return SyncResult(
             env_dir,
             project_path,
-            source_project_path,
+            source_path,
             requested,
             installed,
             functional,
             include_jlarrays,
             persisted,
-            :path_project,
+            source_kind,
             warned,
             false,
         )
@@ -697,20 +683,91 @@ function _install_and_filter_backends!(
             if checker(backend)
                 return [backend], [backend]
             else
+                _warn_dropped_backend(backend)
                 _remove_backend!(backend, io)
             end
         end
         return Symbol[], Symbol[]
     else
-        installed = _install_backends!(requested, io)
-        for backend in installed
-            if !checker(backend)
-                _remove_backend!(backend, io)
-                filter!(b -> b != backend, installed)
-            end
-        end
+        installed = _drop_nonfunctional!(_install_backends!(requested, io), checker, b -> _remove_backend!(b, io))
         return installed, copy(installed)
     end
+end
+
+# Remove every backend in `installed` that fails `checker`, calling `remove!` on it.
+# Iterates over a copy: deleting from `installed` while iterating it would skip
+# the backend that follows each dropped one.
+function _drop_nonfunctional!(installed::Vector{Symbol}, checker::Function, remove!::Function)
+    for backend in copy(installed)
+        checker(backend) && continue
+        _warn_dropped_backend(backend)
+        remove!(backend)
+        filter!(!=(backend), installed)
+    end
+    return installed
+end
+
+# A backend predicted from the hardware was installed but failed its functional
+# check. Say so: the default checker only logs the cause at debug level, and a
+# silently missing backend makes GPU test suites pass vacuously.
+function _warn_dropped_backend(backend::Symbol)
+    @warn "Backend $(backend) was installed but failed its functional check; it is " *
+        "dropped for now and retried on the next activation. Run with " *
+        "JULIA_DEBUG=GPUEnv to see the error." backend
+    return nothing
+end
+
+# Requested backends whose package is a dependency of the overlay at
+# `project_path`. Backends that fail their functional check are removed from the
+# overlay with `Pkg.rm`, so its deps are the record of what is installed.
+function _overlay_backends(project_path::AbstractString, requested::AbstractVector{Symbol})
+    deps = get(TOML.parsefile(project_path), "deps", Dict{String, Any}())
+    return Symbol[b for b in requested if haskey(BACKEND_SPECS, b) && haskey(deps, BACKEND_SPECS[b].package)]
+end
+
+# Backends worth retrying on a reused overlay. With `only_first`, the overlay
+# holds one backend by design, so only the backends preferred over it (earlier
+# in `requested`) count as missing.
+function _backends_to_retry(requested::AbstractVector{Symbol}, installed::AbstractVector{Symbol}, only_first::Bool)
+    candidates = filter(b -> haskey(BACKEND_SPECS, b), requested)
+    only_first || return setdiff(candidates, installed)
+    isempty(installed) && return candidates
+    first_ok = findfirst(==(first(installed)), candidates)
+    return first_ok === nothing ? candidates : candidates[1:(first_ok - 1)]
+end
+
+# On a reused overlay, retry the requested backends it lacks instead of rebuilding
+# it: a backend may have failed its check for a reason that has since gone away
+# (a login node without the driver, a stale precompile cache, a busy device).
+# Returns the backends the overlay holds afterwards.
+function _retry_missing_backends!(
+        project_path::AbstractString,
+        requested::AbstractVector{Symbol},
+        checker::Function,
+        only_first::Bool,
+        io::IO,
+    )
+    installed = _overlay_backends(project_path, requested)
+    missing = _backends_to_retry(requested, installed, only_first)
+    isempty(missing) && return installed
+
+    # `Pkg.rm` dropped the [compat] entry along with the dependency, so restore
+    # both before adding the package again, exactly as a fresh overlay has them.
+    open(project_path, "w") do f
+        TOML.print(f, _merge_backend_entries(TOML.parsefile(project_path), missing))
+    end
+    retried, _ = _install_and_filter_backends!(missing, checker, only_first, io)
+    # A backend whose install failed is still listed in the deps; take it out so
+    # the overlay stays resolvable.
+    for backend in setdiff(missing, retried)
+        backend in _overlay_backends(project_path, [backend]) && _remove_backend!(backend, io)
+    end
+    if only_first && !isempty(retried)
+        # A preferred backend works now: it replaces the one installed before.
+        foreach(b -> _remove_backend!(b, io), installed)
+    end
+    isempty(retried) || Pkg.precompile(; io = io)
+    return _overlay_backends(project_path, requested)
 end
 
 # Copy a manifest file to `dest`, rewriting any relative `path =` entries to
@@ -956,6 +1013,7 @@ function _sync_state_data(
         project_data::Dict{String, Any},
         manifest_source::Union{Nothing, String},
         requested_backends::AbstractVector{Symbol},
+        only_first::Bool = false,
     )
     io = IOBuffer()
     TOML.print(io, project_data)
@@ -966,6 +1024,7 @@ function _sync_state_data(
         "requested_backends" => String.(requested_backends),
         "source_manifest_name" => manifest_source === nothing ? "" : basename(manifest_source),
         "source_manifest_deps" => _manifest_deps_fingerprint(manifest_source),
+        "only_first" => only_first,
     )
 end
 
@@ -986,6 +1045,7 @@ function _can_reuse_persisted_env(sync_state::Dict{String, Any}, env_dir::Abstra
     get(stored_state, "requested_backends", nothing) == sync_state["requested_backends"] || return false
     get(stored_state, "source_manifest_name", nothing) == sync_state["source_manifest_name"] || return false
     get(stored_state, "source_manifest_deps", nothing) == sync_state["source_manifest_deps"] || return false
+    get(stored_state, "only_first", nothing) == sync_state["only_first"] || return false
     read(project_path, String) == get(stored_state, "project_toml", "") || return false
     return true
 end
