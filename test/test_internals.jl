@@ -110,9 +110,12 @@ end
     touch(joinpath(dir, "nvcuda.dll"))
     no_cache = () -> error("the linker cache is not needed")
 
-    linux_env = Dict("LD_LIBRARY_PATH" => "/nonexistent:" * dir)
-    @test GPUEnv._find_library_file(["libcuda", "libcuda.so.1"]; os = :linux, env = linux_env, system_libraries = no_cache) ==
-        joinpath(dir, "libcuda.so.1")
+    # A Windows temp path contains a drive colon, so it cannot go in a Linux search path.
+    if !Sys.iswindows()
+        linux_env = Dict("LD_LIBRARY_PATH" => "/nonexistent:" * dir)
+        @test GPUEnv._find_library_file(["libcuda", "libcuda.so.1"]; os = :linux, env = linux_env, system_libraries = no_cache) ==
+            joinpath(dir, "libcuda.so.1")
+    end
     @test GPUEnv._find_library_file(["nvcuda"]; os = :windows, env = Dict("PATH" => dir), system_libraries = no_cache) ==
         joinpath(dir, "nvcuda.dll")
 
