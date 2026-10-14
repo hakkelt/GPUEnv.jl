@@ -779,7 +779,8 @@ function _retry_missing_backends!(
 end
 
 # Failed backends are recorded in the sync state with what could change the
-# outcome: the Julia version and the latest registered release of the package.
+# outcome: the Julia and GPUEnv versions and the latest registered release of
+# the package.
 _failure_record(backend::Symbol) = Dict{String, Any}(
     "julia" => string(VERSION),
     "gpuenv" => string(pkgversion(@__MODULE__)),
@@ -807,7 +808,8 @@ function _refresh_registries(last_update::Real, io::IO; now::Real = time(), upda
 end
 
 # Whether a missing `backend` should be retried: it never failed here, or the
-# Julia version or the latest registered release changed since it did.
+# Julia version, the GPUEnv version or the latest registered release changed
+# since it did.
 function _retry_due(backend::Symbol, failures::AbstractDict)
     record = get(failures, String(backend), nothing)
     record isa AbstractDict || return true
