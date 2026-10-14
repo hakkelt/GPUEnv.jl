@@ -13,6 +13,7 @@ TestItems = "1c621080-faea-4a02-84b6-bbd5e436b8fe"
 [compat]
 Aqua = "0.8"
 Documenter = "1"
+JLArrays = "0.4.2"
 Logging = "1.10"
 Pkg = "1.10"
 TOML = "1"
