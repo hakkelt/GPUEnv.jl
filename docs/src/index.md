@@ -47,7 +47,8 @@ that do.
 
 Backends with an AbstractFFTs implementation (`gpu_backends(; supports_fftw = true)`)
 are CUDA, AMDGPU, Metal (Metal.jl 1.10 or newer) and JLArrays on Julia 1.11 or
-newer. `require_float64` defaults to `supports_fftw`, so this returns the
+newer, except JLArrays 0.3.2 and 0.4 onwards, which reject the pointer conversion
+FFTW needs. `require_float64` defaults to `supports_fftw`, so this returns the
 backends that transform `Float64` data like FFTW does; Metal, whose FFTs take
 `Float32`/`Float16` data only, is added with
 `gpu_backends(; supports_fftw = true, require_float64 = false)`.

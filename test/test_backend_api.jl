@@ -108,13 +108,14 @@ end
     @test !any(b -> b.name === :oneAPI, all_native)
     @test !any(b -> b.name === :OpenCL, all_native)
 
-    # JLArrays exclusion depends on Julia version
+    # JLArrays exclusion depends on the Julia version and on the JLArrays version
     has_jl_fftw = any(is_jlarray_backend, fftw_backends)
-    if VERSION < v"1.11"
-        @test !has_jl_fftw
-    else
-        @test has_jl_fftw
-    end
+    jl_version = pkgversion(JLArrays)
+    @test has_jl_fftw == (VERSION >= v"1.11" && jl_version < v"0.4" && jl_version != v"0.3.2")
+    @test !GPUEnv._supports_fftw(:JLArrays, v"0.3.2")
+    @test !GPUEnv._supports_fftw(:JLArrays, v"0.4.2")
+    @test GPUEnv._supports_fftw(:JLArrays, v"0.3.3") == (VERSION >= v"1.11")
+    @test GPUEnv._supports_fftw(:JLArrays, nothing) == (VERSION >= v"1.11")
 
     # Metal implements AbstractFFTs from Metal.jl 1.10 on
     MetalStub = Module(:Metal)
@@ -447,7 +448,8 @@ end
     @test occursin(r"CUDA\s+yes\s+no\s+yes\s+yes\s+-\s+yes", out)
     @test occursin(r"AMDGPU\s+no\s+yes\s+yes\s+no\s+-\s+yes", out)
     @test occursin(r"Metal\s+no\s+no\s+no\s+-\s+-\s+-", out)
-    @test occursin(Regex("JLArrays\\s+-\\s+-\\s+yes\\s+yes\\s+yes\\s+" * (VERSION >= v"1.11" ? "yes" : "no")), out)
+    jl_fft = GPUEnv._supports_fftw(:JLArrays, GPUEnv._installed_version(:JLArrays))
+    @test occursin(Regex("JLArrays\\s+-\\s+-\\s+yes\\s+yes\\s+yes\\s+" * (jl_fft ? "yes" : "no")), out)
     @test !any(endswith(' '), split(out, '\n'))
 
     @test report_backends(

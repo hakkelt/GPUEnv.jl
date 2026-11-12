@@ -415,9 +415,9 @@ function gpu_backends(
 
     backends = GpuBackend[]
 
-    if resolved_cpu_backends && (!supports_fftw || _supports_fftw(:JLArrays, nothing))
+    if resolved_cpu_backends
         binding = _loaded_binding(:JLArrays)
-        if binding !== nothing
+        if binding !== nothing && (!supports_fftw || _supports_fftw(:JLArrays, binding[1]))
             push!(backends, GpuBackend(:JLArray, binding...))
         end
     end
@@ -437,9 +437,13 @@ function gpu_backends(
 end
 
 # Whether `backend` at package `version` implements AbstractFFTs for its arrays.
-# JLArrays does from Julia 1.11 on; an unknown version is trusted.
+# JLArrays runs FFTW on its host memory from Julia 1.11 on, through the pointer
+# conversion that JLArrays 0.3.2 and 0.4 onwards reject; an unknown version is trusted.
 function _supports_fftw(backend::Symbol, version::Union{Nothing, VersionNumber})
-    backend === :JLArrays && return VERSION >= v"1.11"
+    if backend === :JLArrays
+        VERSION >= v"1.11" || return false
+        return version === nothing || (version < v"0.4" && version != v"0.3.2")
+    end
     min_version = get(FFTW_NATIVE_BACKENDS, backend, nothing)
     min_version === nothing && return false
     return version === nothing || version >= min_version
