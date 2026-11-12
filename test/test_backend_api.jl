@@ -336,6 +336,30 @@ end
     @test FakeWithSync.synchronized[]
 end
 
+@testitem "synchronize_backend drains the OpenCL command queue" begin
+    using GPUEnv
+    using Test
+
+    # OpenCL.jl has no `synchronize`; the host waits with `cl.finish(cl.queue())`.
+    module FakeOpenCLSync
+    module cl
+        const finished = Ref{Any}(nothing)
+        queue() = :current_queue
+        finish(q) = (finished[] = q; nothing)
+    end
+    end
+
+    backend = GpuBackend(:OpenCL, FakeOpenCLSync, Vector{Float32})
+    @test synchronize_backend(backend) === nothing
+    @test FakeOpenCLSync.cl.finished[] === :current_queue
+
+    # An OpenCL module without that API is a no-op, like other backends
+    module FakeOpenCLNoQueue
+    module cl end
+    end
+    @test synchronize_backend(GpuBackend(:OpenCL, FakeOpenCLNoQueue, Vector{Float32})) === nothing
+end
+
 # ── include_cpu_backends auto-resolve and conflict detection ─────────────────────
 
 @testitem "gpu_backends with backends_to_test=[:JLArrays] auto-enables JLArrays" begin

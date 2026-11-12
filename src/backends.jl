@@ -64,8 +64,10 @@ is_jlarray_backend(backend::GpuBackend) = backend.name === :JLArray
 Wait for all pending GPU operations on `backend` to complete.
 
 Delegates to `backend.module_ref.synchronize()` when the backend exposes a
-`synchronize` function. Backends that do not provide this symbol are a silent
-no-op, so this function is safe to call unconditionally in device-agnostic code.
+`synchronize` function. OpenCL has none; there the command queue of the device
+the functional check chose is drained with `cl.finish(cl.queue())`. Backends that
+provide neither are a silent no-op, so this function is safe to call
+unconditionally in device-agnostic code.
 
 # Arguments
 - `backend::GpuBackend`: the GPU backend to synchronize
@@ -74,9 +76,10 @@ function synchronize_backend(backend::GpuBackend)
     is_jlarray_backend(backend) && return nothing
     if backend.name == :OpenCL
         _select_opencl_device!(backend.module_ref)
-        barrier_func = getfield(backend.module_ref, :barrier)
-        fence_const = getfield(backend.module_ref, :CLK_LOCAL_MEM_FENCE)
-        Base.invokelatest(barrier_func, fence_const)
+        isdefined(backend.module_ref, :cl) || return nothing
+        cl = getfield(backend.module_ref, :cl)
+        all(name -> isdefined(cl, name), (:finish, :queue)) || return nothing
+        Base.invokelatest(getfield(cl, :finish), Base.invokelatest(getfield(cl, :queue)))
         return nothing
     else
         isdefined(backend.module_ref, :synchronize) || return nothing
